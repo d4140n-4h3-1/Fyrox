@@ -88,3 +88,4 @@ pub mod sampler;
 pub mod server;
 /// Texture creation, upload, and format mapping.
 pub mod texture;
+mod vertex_depth;

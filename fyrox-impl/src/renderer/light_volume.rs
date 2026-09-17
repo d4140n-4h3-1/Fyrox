@@ -36,7 +36,7 @@ use crate::{
         },
         framework::GeometryBufferExt,
         gbuffer::GBuffer,
-        make_viewport_matrix,
+        make_deferred_viewport_matrix,
         resources::RendererResources,
         RenderPassStatistics,
     },
@@ -90,7 +90,9 @@ impl LightVolumeRenderer {
 
         let mut stats = RenderPassStatistics::default();
 
-        let frame_matrix = make_viewport_matrix(viewport);
+        // The volumetric shaders rebuild view-space positions from the G-buffer depth, so the
+        // quad has to line up with the G-buffer the same way the deferred light passes do.
+        let frame_matrix = make_deferred_viewport_matrix(viewport);
         let position = view.transform_point(&Point3::from(light.position)).coords;
         let color = light.color.srgb_to_linear_f32().xyz();
 

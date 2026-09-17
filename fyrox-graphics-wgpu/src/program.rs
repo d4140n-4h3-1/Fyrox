@@ -276,6 +276,22 @@ impl WgpuShader {
             }
         }
 
+        // Vertex shaders are written against OpenGL's clip-space depth; see `vertex_depth`.
+        let source = if matches!(kind, ShaderKind::Vertex) {
+            match crate::vertex_depth::remap_vertex_depth(&source) {
+                Some(remapped) => remapped,
+                None => {
+                    Log::warn(format!(
+                        "Shader {name}: vertex entry point not recognized, depth is left in \
+                         OpenGL's range"
+                    ));
+                    source
+                }
+            }
+        } else {
+            source
+        };
+
         let declarations = generate_wgsl_declarations(resources);
         let shared = include_str!("shaders/shared.wgsl");
 

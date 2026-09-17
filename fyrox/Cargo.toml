@@ -22,5 +22,7 @@ backend_opengl = ["fyrox-impl/backend_opengl"]
 backend_wgpu = ["fyrox-impl/backend_wgpu"]
 
 [dependencies]
-fyrox-impl = { version = "2.0.0-rc.1", path = "../fyrox-impl", optional = true }
+# Default features off, so that the backend is picked only by this crate's own features. Otherwise
+# fyrox-impl's default (OpenGL) is always on and `backend_wgpu` can never take effect.
+fyrox-impl = { version = "2.0.0-rc.1", path = "../fyrox-impl", optional = true, default-features = false }
 fyrox-dylib = { version = "2.0.0-rc.1", path = "../fyrox-dylib", optional = true }

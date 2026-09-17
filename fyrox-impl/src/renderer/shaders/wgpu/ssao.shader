@@ -97,7 +97,9 @@
                             let samplePoint = fragPos + TBN * properties.kernel[i] * properties.radius;
 
                             let offset = properties.projectionMatrix * vec4f(samplePoint, 1.0);
-                            let screenUv = (offset.xy / offset.w) * 0.5 + 0.5;
+                            // Render targets are stored top row first in wgpu.
+                            let ndc = offset.xy / offset.w;
+                            let screenUv = vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 
                             let position = GetViewSpacePosition(screenUv);
 

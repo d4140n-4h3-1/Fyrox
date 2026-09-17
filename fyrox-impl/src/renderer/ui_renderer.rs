@@ -77,6 +77,10 @@ pub struct UiRenderContext<'a, 'b, 'c> {
     pub viewport: Rect<i32>,
     /// Frame buffer to where render the user interface.
     pub frame_buffer: &'b GpuFrameBuffer,
+    /// Draw the user interface upside down. Used when rendering into a texture with a backend
+    /// that stores the top row of a render target first, so the texture comes out laid out the
+    /// same way it does with OpenGL, which is what materials sampling it expect.
+    pub flip_y: bool,
     /// Width of the frame buffer to where render the user interface.
     pub frame_width: f32,
     /// Height of the frame buffer to where render the user interface.
@@ -294,6 +298,7 @@ impl UiRenderer {
             server,
             viewport,
             frame_buffer,
+            flip_y,
             frame_width,
             frame_height,
             drawing_context,
@@ -312,7 +317,11 @@ impl UiRenderer {
         self.geometry_buffer
             .set_triangles(drawing_context.get_triangles());
 
-        let ortho = Matrix4::new_orthographic(0.0, frame_width, frame_height, 0.0, -1.0, 1.0);
+        let ortho = if flip_y {
+            Matrix4::new_orthographic(0.0, frame_width, 0.0, frame_height, -1.0, 1.0)
+        } else {
+            Matrix4::new_orthographic(0.0, frame_width, frame_height, 0.0, -1.0, 1.0)
+        };
         let resolution = Vector2::new(frame_width, frame_height);
 
         let uniform_blocks = write_uniform_blocks(
@@ -335,8 +344,14 @@ impl UiRenderer {
 
             let scissor_box = Some(ScissorBox {
                 x: clip_bounds.position.x as i32,
-                // Because OpenGL was designed for mathematicians, it has origin at lower left corner.
-                y: viewport.size.y - (clip_bounds.position.y + clip_bounds.size.y) as i32,
+                // Because OpenGL was designed for mathematicians, it has origin at lower left
+                // corner. A flipped interface is already upside down, so its clip rectangle is
+                // too.
+                y: if flip_y {
+                    clip_bounds.position.y as i32
+                } else {
+                    viewport.size.y - (clip_bounds.position.y + clip_bounds.size.y) as i32
+                },
                 width: clip_bounds.size.x as i32,
                 height: clip_bounds.size.y as i32,
             });

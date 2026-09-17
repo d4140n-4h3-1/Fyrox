@@ -101,7 +101,8 @@
 
                         let tex_coord = vec2f(
                             (1.0 + screen_pos.x) / 2.0 + (0.5 / properties.resolution.x),
-                            (1.0 + screen_pos.y) / 2.0 + (0.5 / properties.resolution.y)
+                            // Render targets are stored top row first in wgpu.
+                            (1.0 - screen_pos.y) / 2.0 + (0.5 / properties.resolution.y)
                         );
 
                         let mask_index = textureLoad(decalMask_tex, vec2i(tex_coord * vec2f(textureDimensions(decalMask_tex))), 0);

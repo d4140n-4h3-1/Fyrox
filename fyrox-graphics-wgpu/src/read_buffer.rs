@@ -23,7 +23,7 @@ use fyrox_graphics::{
     core::math::Rect, error::FrameworkError, framebuffer::GpuFrameBufferTrait,
     gpu_texture::GpuTextureKind, read_buffer::GpuAsyncReadBufferTrait,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Weak;
 
 /// Wgpu implementation of [`GpuAsyncReadBufferTrait`].
@@ -39,11 +39,15 @@ use std::rc::Weak;
 /// 3. Poll [`try_read`](Self::try_read) each frame until the data is ready
 pub struct WgpuAsyncReadBuffer {
     server: Weak<WgpuGraphicsServer>,
-    buffer: wgpu::Buffer,
+    /// Grows when a transfer needs more room than the pixels themselves, because copied rows are
+    /// padded to [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`].
+    buffer: RefCell<wgpu::Buffer>,
     _pixel_count: usize,
     pixel_size: usize,
     request_pending: Cell<bool>,
     size_bytes: usize,
+    /// Layout of the scheduled transfer: row count, unpadded and padded row length in bytes.
+    rows: Cell<(usize, usize, usize)>,
 }
 
 impl WgpuAsyncReadBuffer {
@@ -68,11 +72,12 @@ impl WgpuAsyncReadBuffer {
         });
         Ok(Self {
             server: server.weak_ref(),
-            buffer,
+            buffer: RefCell::new(buffer),
             _pixel_count: pixel_count,
             pixel_size,
             request_pending: Cell::new(false),
             size_bytes,
+            rows: Cell::new((0, 0, 0)),
         })
     }
 }
@@ -105,6 +110,28 @@ impl GpuAsyncReadBufferTrait for WgpuAsyncReadBuffer {
         };
         let bpp = self.pixel_size;
 
+        // The copy must see everything drawn before it, so send those draws first.
+        server.submit_pending();
+
+        let row = w * bpp;
+        let padded_row = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+        let needed = if h == 0 {
+            0
+        } else {
+            padded_row * (h - 1) + row
+        };
+        if needed as u64 > self.buffer.borrow().size() {
+            *self.buffer.borrow_mut() =
+                server.state.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: needed as u64,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+        }
+        self.rows.set((h, row, padded_row));
+        let buffer = self.buffer.borrow();
+
         let mut encoder = server
             .state
             .device
@@ -117,10 +144,10 @@ impl GpuAsyncReadBufferTrait for WgpuAsyncReadBuffer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &self.buffer,
+                buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some((w as u32 * bpp as u32).max(256)),
+                    bytes_per_row: Some(padded_row as u32),
                     rows_per_image: Some(h as u32),
                 },
             },
@@ -144,7 +171,14 @@ impl GpuAsyncReadBufferTrait for WgpuAsyncReadBuffer {
             return None;
         }
         let server = self.server.upgrade()?;
-        let slice = self.buffer.slice(..self.size_bytes as u64);
+        let buffer = self.buffer.borrow();
+        let (rows, row, padded_row) = self.rows.get();
+        let copied = if rows == 0 {
+            0
+        } else {
+            padded_row * (rows - 1) + row
+        };
+        let slice = buffer.slice(..copied.max(1) as u64);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             tx.send(r).ok();
@@ -161,9 +195,14 @@ impl GpuAsyncReadBufferTrait for WgpuAsyncReadBuffer {
             Ok(Ok(())) => {
                 if let Ok(mapped) = slice.get_mapped_range() {
                     let mut result = vec![0u8; self.size_bytes];
-                    result.copy_from_slice(&mapped);
+                    for y in 0..rows {
+                        let src = y * padded_row;
+                        let dst = y * row;
+                        let len = row.min(self.size_bytes.saturating_sub(dst));
+                        result[dst..dst + len].copy_from_slice(&mapped[src..src + len]);
+                    }
                     drop(mapped);
-                    self.buffer.unmap();
+                    buffer.unmap();
                     self.request_pending.set(false);
                     Some(result)
                 } else {

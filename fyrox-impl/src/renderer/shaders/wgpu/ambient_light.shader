@@ -140,7 +140,7 @@
 
                         var reflection: vec3f;
                         if (properties.skyboxLighting != 0u) {
-                            reflection = S_SRGBToLinear(textureSampleLevel(prefilteredSpecularMap_tex, prefilteredSpecularMap_samp, reflection_vector, mip)).rgb;
+                            reflection = S_SRGBToLinear(textureSampleLevel(prefilteredSpecularMap_tex, prefilteredSpecularMap_samp, S_RenderedCubeDirection(reflection_vector), mip)).rgb;
                         } else {
                             reflection = properties.ambientColor.rgb;
                         }
@@ -155,7 +155,7 @@
                         let ambient_occlusion = textureSample(aoSampler_tex, aoSampler_samp, tex_coord).r * material_ao;
                         let baked_lighting = textureSample(bakedLightingTexture_tex, bakedLightingTexture_samp, tex_coord);
 
-                        let irradiance = S_SRGBToLinear(textureSample(irradianceMap_tex, irradianceMap_samp, fragment_normal)).rgb;
+                        let irradiance = S_SRGBToLinear(textureSample(irradianceMap_tex, irradianceMap_samp, S_RenderedCubeDirection(fragment_normal))).rgb;
 
                         var ambient_lighting: vec3f;
                         if (properties.skyboxLighting != 0u) {

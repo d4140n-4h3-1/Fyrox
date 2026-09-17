@@ -66,8 +66,39 @@ fn S_Project(worldPosition: vec3f, matrix: mat4x4f) -> vec3f {
     return (screenPos.xyz / screenPos.w) * 0.5 + 0.5;
 }
 
+// Turns a lookup direction into the one to use with a cube map the renderer drew itself (point
+// shadow maps, irradiance and specular probes). Their faces are rendered with OpenGL's face
+// orientations, but wgpu stores rendered rows top first, so every face comes out flipped
+// vertically compared to OpenGL. Flipping a face's vertical texture coordinate means negating
+// the direction's y on the side faces and its z on the top and bottom faces. Cube maps loaded
+// from images, such as sky boxes, are stored alike in both APIs and must not go through this.
+fn S_RenderedCubeDirection(direction: vec3f) -> vec3f {
+    let a = abs(direction);
+    if (a.y >= a.x && a.y >= a.z) {
+        return vec3f(direction.x, direction.y, -direction.z);
+    }
+    return vec3f(direction.x, -direction.y, direction.z);
+}
+
+// Maps a world position to texture coordinates (and depth) of a render target the matrix
+// renders into. wgpu stores the top row of a render target first, OpenGL the bottom one, so
+// unlike `S_Project` - which suits ordinary textures such as light cookies - the vertical
+// coordinate is flipped. Depth is OpenGL's window depth; see the vertex depth remapping.
+fn S_ProjectToTexture(worldPosition: vec3f, matrix: mat4x4f) -> vec3f {
+    let clip = matrix * vec4f(worldPosition, 1.0);
+    let ndc = clip.xyz / clip.w;
+    return vec3f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, ndc.z * 0.5 + 0.5);
+}
+
+// Inverse of `S_ProjectToTexture`: rebuilds a position from render target texture coordinates
+// and the depth stored there.
 fn S_UnProject(screenPos: vec3f, matrix: mat4x4f) -> vec3f {
-    let clipSpacePos = vec4f(screenPos * 2.0 - 1.0, 1.0);
+    let clipSpacePos = vec4f(
+        screenPos.x * 2.0 - 1.0,
+        1.0 - screenPos.y * 2.0,
+        screenPos.z * 2.0 - 1.0,
+        1.0,
+    );
     let position = matrix * clipSpacePos;
     return position.xyz / position.w;
 }
@@ -183,7 +214,7 @@ fn S_PointShadow(
 
             for (var i = 0; i < 20; i++) {
                 let fetchDirection = -toLight + directions[i] * diskRadius;
-                let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, fetchDirection).r;
+                let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, S_RenderedCubeDirection(fetchDirection)).r;
                 if (biasedFragmentDistance > shadowDistanceToLight) {
                     accumulator += 1.0;
                 }
@@ -191,7 +222,7 @@ fn S_PointShadow(
 
             return clamp(1.0 - accumulator / 20.0, 0.0, 1.0);
         } else {
-            let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, -toLight).r;
+            let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, S_RenderedCubeDirection(-toLight)).r;
             return select(1.0, 0.0, biasedFragmentDistance > shadowDistanceToLight);
         }
     } else {
@@ -210,7 +241,7 @@ fn S_SpotShadowFactor(
     spotShadowTexture_samp: sampler) -> f32
 {
     if (shadowsEnabled) {
-        let lightSpacePosition = S_Project(fragmentPosition, lightViewProjMatrix);
+        let lightSpacePosition = S_ProjectToTexture(fragmentPosition, lightViewProjMatrix);
 
         let biasedLightSpaceFragmentDepth = lightSpacePosition.z - shadowBias;
 
@@ -270,12 +301,12 @@ fn S_PointShadow_Depth(
             var accumulator = 0.0;
             for (var i = 0; i < 20; i++) {
                 let fetchDirection = -toLight + directions[i] * diskRadius;
-                let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, fetchDirection);
+                let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, S_RenderedCubeDirection(fetchDirection));
                 if (biasedFragmentDistance > shadowDistanceToLight) { accumulator += 1.0; }
             }
             return clamp(1.0 - accumulator / 20.0, 0.0, 1.0);
         } else {
-            let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, -toLight);
+            let shadowDistanceToLight = textureSample(shadowMap_tex, shadowMap_samp, S_RenderedCubeDirection(-toLight));
             return select(1.0, 0.0, biasedFragmentDistance > shadowDistanceToLight);
         }
     } else { return 1.0; }
@@ -293,7 +324,7 @@ fn S_SpotShadowFactor_Depth(
     spotShadowTexture_samp: sampler) -> f32
 {
     if (shadowsEnabled) {
-        let lightSpacePosition = S_Project(fragmentPosition, lightViewProjMatrix);
+        let lightSpacePosition = S_ProjectToTexture(fragmentPosition, lightViewProjMatrix);
         let biasedLightSpaceFragmentDepth = lightSpacePosition.z - shadowBias;
         if (softShadows) {
             var accumulator = 0.0;

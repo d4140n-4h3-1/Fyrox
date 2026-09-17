@@ -151,6 +151,38 @@ fn texture_format_for_attachment(tex: &GpuTexture) -> Option<wgpu::TextureFormat
     Some(tex.as_any().downcast_ref::<WgpuTexture>()?.format())
 }
 
+/// The part of [`DrawParameters`] that is baked into a pipeline. The scissor box and the stencil
+/// reference value are set per draw, so they are cleared to keep them from multiplying pipelines.
+#[derive(PartialEq, Eq, Clone)]
+struct PipelineParams(DrawParameters);
+
+impl PipelineParams {
+    fn new(params: &DrawParameters) -> Self {
+        let mut params = params.clone();
+        params.scissor_box = None;
+        if let Some(stencil_test) = params.stencil_test.as_mut() {
+            stencil_test.ref_value = 0;
+        }
+        Self(params)
+    }
+}
+
+impl Hash for PipelineParams {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // DrawParameters has no Hash of its own; its Debug output covers every field, and is
+        // streamed into the hasher without building a string.
+        struct HashWriter<'a, H: Hasher>(&'a mut H);
+        impl<H: Hasher> std::fmt::Write for HashWriter<'_, H> {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                self.0.write(s.as_bytes());
+                Ok(())
+            }
+        }
+        use std::fmt::Write;
+        let _ = write!(HashWriter(state), "{:?}", self.0);
+    }
+}
+
 /// Hashable key for the render pipeline cache.
 ///
 /// Encodes all state that affects pipeline creation: program identity, color/depth
@@ -159,14 +191,21 @@ fn texture_format_for_attachment(tex: &GpuTexture) -> Option<wgpu::TextureFormat
 /// slots. Two draw calls with identical keys can share a pipeline.
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub struct PipelineKey {
-    /// Identity of the shader program (pointer-based).
-    program_ptr: usize,
+    /// The shader program, identified by its compiled modules rather than by the address of
+    /// the engine's program object, which can be reused by a different program once the old
+    /// one is freed. The cached pipeline keeps these modules alive, so their identity is stable.
+    vertex_module: wgpu::ShaderModule,
+    fragment_module: wgpu::ShaderModule,
     /// Color attachment formats for the render pass.
     color_formats: Vec<wgpu::TextureFormat>,
     /// Depth-stencil attachment format, if present.
     depth_format: Option<wgpu::TextureFormat>,
     /// MSAA sample count.
     sample_count: u32,
+    /// Every pipeline setting the draw asked for - blend factors, depth and stencil functions,
+    /// color mask. Flags alone are not enough: two passes that both blend, but differently,
+    /// must not share a pipeline.
+    params: PipelineParams,
     /// Whether alpha blending is enabled.
     blend: bool,
     /// Whether depth testing is enabled.
@@ -204,10 +243,12 @@ pub struct WgpuFrameBuffer {
     depth_attachment: Option<Attachment>,
     color_attachments: Vec<Attachment>,
     is_backbuffer: bool,
-    needs_clear: Cell<bool>,
-    pending_clear_color: RefCell<wgpu::Color>,
-    pending_clear_depth: RefCell<f32>,
-    pending_clear_stencil: RefCell<u32>,
+    /// Clears requested since the last pass on this framebuffer. Each part is cleared only if it
+    /// was asked for: the deferred light renderer clears just the stencil between lights, and
+    /// clearing color with it would wipe the light already accumulated.
+    pending_clear_color: Cell<Option<wgpu::Color>>,
+    pending_clear_depth: Cell<Option<f32>>,
+    pending_clear_stencil: Cell<Option<u32>>,
     backbuffer_depth_cache: RefCell<Option<(u32, u32, wgpu::Texture)>>,
 }
 
@@ -223,12 +264,17 @@ impl WgpuFrameBuffer {
             depth_attachment: depth,
             color_attachments: colors,
             is_backbuffer: false,
-            needs_clear: Cell::new(false),
-            pending_clear_color: RefCell::new(wgpu::Color::BLACK),
-            pending_clear_depth: RefCell::new(1.0),
-            pending_clear_stencil: RefCell::new(0),
+            pending_clear_color: Cell::new(None),
+            pending_clear_depth: Cell::new(None),
+            pending_clear_stencil: Cell::new(None),
             backbuffer_depth_cache: RefCell::new(None),
         })
+    }
+
+    fn has_pending_clear(&self) -> bool {
+        self.pending_clear_color.get().is_some()
+            || self.pending_clear_depth.get().is_some()
+            || self.pending_clear_stencil.get().is_some()
     }
 
     /// Creates a backbuffer framebuffer that renders to the screen surface.
@@ -241,10 +287,9 @@ impl WgpuFrameBuffer {
             depth_attachment: depth,
             color_attachments: Default::default(),
             is_backbuffer: true,
-            needs_clear: Cell::new(false),
-            pending_clear_color: RefCell::new(wgpu::Color::BLACK),
-            pending_clear_depth: RefCell::new(1.0),
-            pending_clear_stencil: RefCell::new(0),
+            pending_clear_color: Cell::new(None),
+            pending_clear_depth: Cell::new(None),
+            pending_clear_stencil: Cell::new(None),
             backbuffer_depth_cache: RefCell::new(None),
         }
     }
@@ -287,10 +332,12 @@ impl WgpuFrameBuffer {
         };
 
         let key = PipelineKey {
-            program_ptr: program as *const WgpuProgram as usize,
+            vertex_module: program.vertex_module().clone(),
+            fragment_module: program.fragment_module().clone(),
             color_formats: color_formats.to_vec(),
             depth_format: df,
             sample_count: server.msaa_sample_count,
+            params: PipelineParams::new(params),
             blend: params.blend.is_some(),
             depth_test: params.depth_test.is_some(),
             depth_write: params.depth_write,
@@ -415,6 +462,13 @@ impl WgpuFrameBuffer {
             fyrox_graphics::ElementKind::Point => wgpu::PrimitiveTopology::PointList,
         };
 
+        let mask = &params.color_write;
+        let mut write_mask = wgpu::ColorWrites::empty();
+        write_mask.set(wgpu::ColorWrites::RED, mask.red);
+        write_mask.set(wgpu::ColorWrites::GREEN, mask.green);
+        write_mask.set(wgpu::ColorWrites::BLUE, mask.blue);
+        write_mask.set(wgpu::ColorWrites::ALPHA, mask.alpha);
+
         let color_targets: Vec<Option<wgpu::ColorTargetState>> = color_formats
             .iter()
             .map(|&format| {
@@ -427,7 +481,7 @@ impl WgpuFrameBuffer {
                 Some(wgpu::ColorTargetState {
                     format,
                     blend,
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask,
                 })
             })
             .collect();
@@ -585,7 +639,7 @@ impl WgpuFrameBuffer {
             pass.is_none()
                 || pass.as_ref().unwrap().framebuffer_id != fb_id
                 || (self.is_backbuffer && server.backbuffer_needs_clear.get())
-                || (!self.is_backbuffer && self.needs_clear.get())
+                || (!self.is_backbuffer && self.has_pending_clear())
         };
 
         if requires_new_pass {
@@ -629,28 +683,7 @@ impl WgpuFrameBuffer {
             let color_views: Vec<wgpu::TextureView> = if self.is_backbuffer {
                 vec![surface_tex.unwrap()]
             } else {
-                self.color_attachments
-                    .iter()
-                    .map(|att| {
-                        if let Some(face) = att.cube_map_face() {
-                            let wt = att.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
-                            wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
-                                dimension: Some(wgpu::TextureViewDimension::D2),
-                                base_array_layer: cubemap_face_to_layer(face),
-                                array_layer_count: Some(1),
-                                mip_level_count: Some(1),
-                                ..Default::default()
-                            })
-                        } else {
-                            att.texture
-                                .as_any()
-                                .downcast_ref::<WgpuTexture>()
-                                .unwrap()
-                                .wgpu_view()
-                                .clone()
-                        }
-                    })
-                    .collect()
+                self.color_attachments.iter().map(attachment_view).collect()
             };
 
             let depth_view = if self.is_backbuffer {
@@ -685,20 +718,7 @@ impl WgpuFrameBuffer {
                     .as_ref()
                     .map(|(_, _, tex)| tex.create_view(&wgpu::TextureViewDescriptor::default()))
             } else {
-                self.depth_attachment.as_ref().map(|a| {
-                    let wt = a.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
-                    if let Some(face) = a.cube_map_face() {
-                        wt.wgpu_texture().create_view(&wgpu::TextureViewDescriptor {
-                            dimension: Some(wgpu::TextureViewDimension::D2),
-                            base_array_layer: cubemap_face_to_layer(face),
-                            array_layer_count: Some(1),
-                            mip_level_count: Some(1),
-                            ..Default::default()
-                        })
-                    } else {
-                        wt.wgpu_view().clone()
-                    }
-                })
+                self.depth_attachment.as_ref().map(attachment_view)
             };
 
             let has_stencil = df.map(format_has_stencil).unwrap_or(false);
@@ -713,15 +733,15 @@ impl WgpuFrameBuffer {
                             None
                         },
                     )
-                } else if !self.is_backbuffer && self.needs_clear.replace(false) {
+                } else if !self.is_backbuffer && self.has_pending_clear() {
+                    fn load<V>(clear: Option<V>) -> wgpu::LoadOp<V> {
+                        clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear)
+                    }
+                    let stencil = load(self.pending_clear_stencil.take());
                     (
-                        wgpu::LoadOp::Clear(*self.pending_clear_color.borrow()),
-                        wgpu::LoadOp::Clear(*self.pending_clear_depth.borrow()),
-                        if has_stencil {
-                            Some(wgpu::LoadOp::Clear(*self.pending_clear_stencil.borrow()))
-                        } else {
-                            None
-                        },
+                        load(self.pending_clear_color.take()),
+                        load(self.pending_clear_depth.take()),
+                        has_stencil.then_some(stencil),
                     )
                 } else {
                     (
@@ -735,6 +755,21 @@ impl WgpuFrameBuffer {
                     )
                 };
 
+            let target_size = if self.is_backbuffer {
+                (current_width, current_height)
+            } else {
+                self.color_attachments
+                    .first()
+                    .or(self.depth_attachment.as_ref())
+                    .and_then(|att| {
+                        let texture = att.texture.as_any().downcast_ref::<WgpuTexture>()?;
+                        let size = texture.wgpu_texture().size();
+                        let level = att.level() as u32;
+                        Some(((size.width >> level).max(1), (size.height >> level).max(1)))
+                    })
+                    .unwrap_or((u32::MAX, u32::MAX))
+            };
+
             *server.active_pass.borrow_mut() = Some(crate::server::ActivePass {
                 framebuffer_id: fb_id,
                 color_views,
@@ -743,6 +778,7 @@ impl WgpuFrameBuffer {
                 depth_load,
                 stencil_load,
                 commands: Vec::new(),
+                target_size,
             });
         }
 
@@ -775,6 +811,35 @@ impl WgpuFrameBuffer {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Returns the view a render pass draws into for an attachment: the selected mip level and, for
+/// cube maps, the selected face. A view of the whole texture would render into mip 0 only, which
+/// leaves the other levels of mip-mapped targets - such as the prefiltered specular probe -
+/// empty.
+fn attachment_view(att: &Attachment) -> wgpu::TextureView {
+    let texture = att.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
+    let level = att.level() as u32;
+    match att.cube_map_face() {
+        Some(face) => texture
+            .wgpu_texture()
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: cubemap_face_to_layer(face),
+                array_layer_count: Some(1),
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }),
+        None if level != 0 || texture.wgpu_texture().mip_level_count() > 1 => texture
+            .wgpu_texture()
+            .create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }),
+        None => texture.wgpu_view().clone(),
+    }
+}
+
 fn copy_attachment_texture(
     encoder: &mut wgpu::CommandEncoder,
     src: &Attachment,
@@ -925,7 +990,9 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
         if let GpuTextureKind::Rectangle { width, height } = texture.kind() {
             let fmt = wtex.format();
             let bps = fmt.block_copy_size(None).unwrap_or(4) as usize;
-            let bytes_per_row = (width * bps).max(256);
+            // Every row of a texture copy has to be a multiple of this many bytes long.
+            let bytes_per_row =
+                (width * bps).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
             let padded_total = bytes_per_row * (height - 1) + width * bps;
             let buf = server.state.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("ReadPx"),
@@ -1001,20 +1068,19 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
         stencil: Option<i32>,
     ) {
         if let Some(c) = color {
-            *self.pending_clear_color.borrow_mut() = wgpu::Color {
+            self.pending_clear_color.set(Some(wgpu::Color {
                 r: c.r as f64 / 255.0,
                 g: c.g as f64 / 255.0,
                 b: c.b as f64 / 255.0,
                 a: c.a as f64 / 255.0,
-            };
+            }));
         }
         if let Some(d) = depth {
-            *self.pending_clear_depth.borrow_mut() = d;
+            self.pending_clear_depth.set(Some(d));
         }
         if let Some(s) = stencil {
-            *self.pending_clear_stencil.borrow_mut() = s as u32;
+            self.pending_clear_stencil.set(Some(s as u32));
         }
-        self.needs_clear.set(true);
     }
     fn draw(
         &self,
@@ -1125,6 +1191,9 @@ fn build_vertex_layouts(geo: &WgpuGeometryBuffer) -> (Vec<wgpu::VertexBufferLayo
     (all, extra)
 }
 
+/// How many bind groups are kept around before the cache is emptied.
+const MAX_CACHED_BIND_GROUPS: usize = 4096;
+
 fn create_bind_group(
     server: &WgpuGraphicsServer,
     program: &WgpuProgram,
@@ -1133,10 +1202,13 @@ fn create_bind_group(
     let mut entries = Vec::new();
     let mut texture_formats: Vec<(usize, wgpu::TextureFormat)> = Vec::new();
 
-    // Compute a cache key from all resource pointers and formats
+    // The cache key is built from the wgpu handles themselves, not from the engine's wrapper
+    // objects. A wrapper can swap its wgpu resource (a buffer that grows is reallocated), and a
+    // freed wrapper's address can be reused by a new one; either way a key based on wrapper
+    // addresses hands back a bind group that still points at the old resource, so shaders read
+    // stale data. A cached bind group keeps its wgpu handles alive, so their identity cannot be
+    // reused while the entry exists.
     let mut hasher = DefaultHasher::new();
-    // Include program identity in the hash
-    hasher.write_usize(program as *const WgpuProgram as usize);
 
     for group in groups {
         for binding in group.bindings {
@@ -1149,22 +1221,22 @@ fn create_bind_group(
                     let wt = texture.as_any().downcast_ref::<WgpuTexture>()?;
                     let ws = sampler.as_any().downcast_ref::<WgpuSampler>()?;
                     texture_formats.push((*loc, wt.format()));
-                    // Hash the WgpuTexture and WgpuSampler thin pointers + format + binding
-                    hasher.write_usize(wt as *const WgpuTexture as usize);
-                    hasher.write_usize(ws as *const WgpuSampler as usize);
+                    let view = wt.wgpu_binding_view();
+                    let sampler = if is_filterable_format(wt.format()) {
+                        ws.wgpu_sampler()
+                    } else {
+                        server.non_filtering_sampler()
+                    };
+                    view.hash(&mut hasher);
+                    sampler.hash(&mut hasher);
                     hasher.write_u32(*loc as u32);
                     entries.push(wgpu::BindGroupEntry {
                         binding: *loc as u32,
-                        resource: wgpu::BindingResource::TextureView(wt.wgpu_binding_view()),
+                        resource: wgpu::BindingResource::TextureView(view),
                     });
-                    let sampler_res = if is_filterable_format(wt.format()) {
-                        wgpu::BindingResource::Sampler(ws.wgpu_sampler())
-                    } else {
-                        wgpu::BindingResource::Sampler(server.non_filtering_sampler())
-                    };
                     entries.push(wgpu::BindGroupEntry {
                         binding: (*loc + SAMPLER_BINDING_OFFSET) as u32,
-                        resource: sampler_res,
+                        resource: wgpu::BindingResource::Sampler(sampler),
                     });
                 }
                 ResourceBinding::Buffer {
@@ -1173,12 +1245,11 @@ fn create_bind_group(
                     data_usage,
                 } => {
                     let wb = buffer.as_any().downcast_ref::<WgpuBuffer>()?;
-                    // Hash the WgpuBuffer thin pointer + binding + data usage
-                    hasher.write_usize(wb as *const WgpuBuffer as usize);
-                    hasher.write_u32(*loc as u32);
                     // SAFETY: No write_data call is active at this point (we're building
                     // bind groups between draw calls), so the buffer reference is stable.
                     let wb_buf = unsafe { wb.wgpu_buffer_raw() };
+                    wb_buf.hash(&mut hasher);
+                    hasher.write_u32(*loc as u32);
                     match data_usage {
                         BufferDataUsage::UseEverything => {
                             hasher.write_u64(0);
@@ -1214,6 +1285,11 @@ fn create_bind_group(
         return None;
     }
 
+    // The layout stands for the program: a different program, even one allocated where an old
+    // one used to be, has a different layout.
+    let (bgl, _) = program.get_or_create_layouts(&texture_formats);
+    bgl.hash(&mut hasher);
+
     let key = hasher.finish();
 
     // Check cache first
@@ -1223,8 +1299,6 @@ fn create_bind_group(
             return Some(bg.clone());
         }
     }
-
-    let (bgl, _) = program.get_or_create_layouts(&texture_formats);
     let bind_group = server
         .state
         .device
@@ -1234,11 +1308,13 @@ fn create_bind_group(
             entries: &entries,
         });
 
-    // Store in cache
-    server
-        .bind_group_cache
-        .borrow_mut()
-        .insert(key, bind_group.clone());
+    // Store in cache. Every entry keeps its buffers and textures alive, so the cache is dropped
+    // wholesale once it grows large rather than pinning GPU memory forever.
+    let mut cache = server.bind_group_cache.borrow_mut();
+    if cache.len() >= MAX_CACHED_BIND_GROUPS {
+        cache.clear();
+    }
+    cache.insert(key, bind_group.clone());
 
     Some(bind_group)
 }

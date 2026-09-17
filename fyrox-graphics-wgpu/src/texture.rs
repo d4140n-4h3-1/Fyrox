@@ -506,6 +506,8 @@ impl GpuTextureTrait for WgpuTexture {
         self.kind.set(kind);
         self.pixel_kind.set(pk);
         if let Some(data) = data {
+            // Commands recorded before this write must not see its data.
+            server.submit_pending();
             Self::upload(
                 &server.state.queue,
                 &self.texture,

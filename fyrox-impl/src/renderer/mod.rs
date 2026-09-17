@@ -678,8 +678,10 @@ impl Renderer {
         let uniform_memory_allocator = UniformMemoryAllocator::new(
             // Use the GPU's max uniform buffer binding size as the page size limit.
             // This ensures individual bindings never exceed the limit enforced by
-            // create_bind_group(). On most GPUs this is 64KB.
-            caps.max_uniform_buffer_binding_size,
+            // create_bind_group(). On most GPUs this is 64KB, but some (AMD with Mesa)
+            // report 2GB, and a page that big turns every upload into a multi-gigabyte
+            // write, so clamp it from above.
+            caps.max_uniform_buffer_binding_size.min(1024 * 1024),
             caps.uniform_buffer_offset_alignment,
         );
 
@@ -874,6 +876,9 @@ impl Renderer {
             server: &*self.server,
             viewport: Rect::new(0, 0, rt_size.x as i32, rt_size.y as i32),
             frame_buffer,
+            // wgpu stores render targets top row first; OpenGL, and the materials that sample
+            // the texture, expect the bottom row first.
+            flip_y: render_info.render_target.is_some() && cfg!(not(feature = "backend_opengl")),
             frame_width: rt_size.x,
             frame_height: rt_size.y,
             drawing_context: &render_info.ui.drawing_context,

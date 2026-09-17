@@ -33,7 +33,7 @@ use crate::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
         },
-        make_viewport_matrix,
+        make_deferred_viewport_matrix,
         resources::RendererResources,
         RenderPassStatistics,
     },
@@ -92,7 +92,10 @@ impl BloomRenderer {
 
         let viewport = Rect::new(0, 0, self.width as i32, self.height as i32);
 
-        let wvp = make_viewport_matrix(viewport);
+        // The glow is blurred twice afterwards, and the blur passes use the plain viewport
+        // matrix. Where that matrix flips the image (wgpu), this pass must not, so the glow ends
+        // up aligned with the scene frame it is added to.
+        let wvp = make_deferred_viewport_matrix(viewport);
         let properties = PropertyGroup::from([
             property("worldViewProjection", &wvp),
             property("threshold", &settings.hdr_settings.bloom_settings.threshold),

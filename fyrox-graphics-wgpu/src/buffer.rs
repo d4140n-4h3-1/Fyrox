@@ -128,6 +128,8 @@ impl GpuBufferTrait for WgpuBuffer {
         let Some(server) = self.server.upgrade() else {
             return Err(FrameworkError::GraphicsServerUnavailable);
         };
+        // Commands recorded before this write must not see its data.
+        server.submit_pending();
         if data.len() <= self.size.get() {
             server
                 .state

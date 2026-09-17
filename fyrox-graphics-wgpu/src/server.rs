@@ -117,6 +117,18 @@ pub struct ActivePass {
     pub stencil_load: Option<wgpu::LoadOp<u32>>,
     /// Accumulated draw commands to replay when the pass is flushed.
     pub commands: Vec<DrawCommand>,
+    /// Width and height of the render target, in pixels. wgpu rejects scissor rectangles that
+    /// reach outside the target, where OpenGL silently clips them, so they are clipped to this.
+    pub target_size: (u32, u32),
+}
+
+/// Clips a rectangle given by its origin and size to `0..limit` along one axis, returning the
+/// clipped origin and size.
+fn clip_span(origin: i32, size: i32, limit: u32) -> (u32, u32) {
+    let limit = limit as i64;
+    let start = (origin as i64).clamp(0, limit);
+    let end = (origin as i64 + size.max(0) as i64).clamp(start, limit);
+    (start as u32, (end - start) as u32)
 }
 
 /// Core wgpu objects shared across the server.
@@ -487,7 +499,10 @@ impl WgpuGraphicsServer {
             ..Default::default()
         });
 
+        let (target_w, target_h) = pass.target_size;
         for cmd in pass.commands {
+            // The viewport may extend past the target - wgpu allows that, and changing it would
+            // stretch the image - but what is outside is clipped by the scissor below.
             rp.set_viewport(
                 cmd.viewport.x() as f32,
                 cmd.viewport.y() as f32,
@@ -496,6 +511,12 @@ impl WgpuGraphicsServer {
                 0.0,
                 1.0,
             );
+            let (vx, vw) = clip_span(cmd.viewport.x(), cmd.viewport.w(), target_w);
+            let (vy, vh) = clip_span(cmd.viewport.y(), cmd.viewport.h(), target_h);
+            if vw == 0 || vh == 0 {
+                // Nothing of this draw would land on the target.
+                continue;
+            }
             rp.set_pipeline(&cmd.pipeline);
             if let Some(bg) = &cmd.bind_group {
                 rp.set_bind_group(0, bg, &[]);
@@ -510,20 +531,16 @@ impl WgpuGraphicsServer {
                     // wgpu uses top-left origin (same as UI coords), so convert:
                     //   y_wgpu = viewport_h - y_gl - height = pos_y
                     let rt_h = cmd.viewport.h();
-                    let wgpu_y = (rt_h - sb.y - sb.height).max(0);
-                    rp.set_scissor_rect(
-                        sb.x.max(0) as u32,
-                        wgpu_y as u32,
-                        sb.width.max(0) as u32,
-                        sb.height.max(0) as u32,
-                    );
+                    let wgpu_y = rt_h - sb.y - sb.height;
+                    let (sx, sw) = clip_span(sb.x, sb.width, target_w);
+                    let (sy, sh) = clip_span(wgpu_y, sb.height, target_h);
+                    if sw == 0 || sh == 0 {
+                        // Scissored away entirely.
+                        continue;
+                    }
+                    rp.set_scissor_rect(sx, sy, sw, sh);
                 }
-                None => rp.set_scissor_rect(
-                    cmd.viewport.x().max(0) as u32,
-                    cmd.viewport.y().max(0) as u32,
-                    cmd.viewport.w().max(0) as u32,
-                    cmd.viewport.h().max(0) as u32,
-                ),
+                None => rp.set_scissor_rect(vx, vy, vw, vh),
             }
             for (i, vb) in cmd.vertex_buffers.iter().enumerate() {
                 rp.set_vertex_buffer(i as u32, vb.slice(..));
@@ -538,6 +555,56 @@ impl WgpuGraphicsServer {
 
         drop(rp);
         *self.frame_encoder.borrow_mut() = Some(encoder);
+    }
+}
+
+impl WgpuGraphicsServer {
+    /// Acquires the next surface image and clears it to black, for frames that drew nothing on
+    /// screen. Returns `None` if no image is available right now.
+    fn clear_surface_frame(&self) -> Option<wgpu::SurfaceTexture> {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            _ => return None,
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .state
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        }));
+        self.state.queue.submit(std::iter::once(encoder.finish()));
+        Some(frame)
+    }
+
+    /// Sends every command recorded so far to the GPU.
+    ///
+    /// Call this before writing to a buffer or texture that recorded commands may use. wgpu
+    /// applies `Queue::write_*` at the next submit, ahead of everything in that submit, so
+    /// without it a draw recorded earlier in the frame would see data written after it. The
+    /// engine is written for OpenGL, where a write takes effect immediately, and it does reuse
+    /// buffers within a frame - the uniform pages are refilled from the start after the
+    /// off-screen UI has been drawn, for example. A shader that loops over a count read from such
+    /// a stale buffer can run long enough for the driver to reset the device.
+    pub fn submit_pending(&self) {
+        self.flush_active_pass();
+        if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
+            self.state.queue.submit(std::iter::once(encoder.finish()));
+        }
     }
 }
 
@@ -664,12 +731,7 @@ impl GraphicsServer for WgpuGraphicsServer {
         self.weak_ref() as Weak<dyn GraphicsServer>
     }
     fn flush(&self) {
-        // flush in Fyrox means "send the accumulated commands to the video card right now."
-        // An empty submit is not needed here, just close and send the encoder, if there is one.
-        self.flush_active_pass();
-        if let Some(encoder) = self.frame_encoder.borrow_mut().take() {
-            self.state.queue.submit(std::iter::once(encoder.finish()));
-        }
+        self.submit_pending();
     }
     fn finish(&self) {
         self.state
@@ -693,7 +755,16 @@ impl GraphicsServer for WgpuGraphicsServer {
             self.state.queue.submit(std::iter::once(encoder.finish()));
         }
 
-        if let Some(frame) = self.current_frame.borrow_mut().take() {
+        let frame = self.current_frame.borrow_mut().take();
+        let frame = match frame {
+            Some(frame) => Some(frame),
+            // Nothing was drawn to the screen this frame. Present a cleared image anyway: the
+            // caller has already asked the window for a frame callback, and on Wayland a surface
+            // that never gets a buffer is never shown and never sends that callback, so the
+            // event loop would wait forever behind an invisible window.
+            None => self.clear_surface_frame(),
+        };
+        if let Some(frame) = frame {
             self.state.queue.present(frame);
         }
 
