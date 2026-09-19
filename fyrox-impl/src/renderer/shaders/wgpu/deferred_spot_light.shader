@@ -32,6 +32,11 @@
             binding: 5
         ),
         (
+            name: "tracedShadowTexture",
+            kind: Texture(kind: Sampler2D, fallback: White),
+            binding: 6
+        ),
+        (
             name: "properties",
             kind: PropertyGroup([
                 (name: "worldViewProjection", kind: Matrix4()),
@@ -51,6 +56,7 @@
                 (name: "cookieEnabled", kind: Bool()),
                 (name: "shadowsEnabled", kind: Bool()),
                 (name: "softShadows", kind: Bool()),
+                (name: "tracedShadows", kind: Bool()),
             ]),
             binding: 0
         ),
@@ -144,7 +150,10 @@
                         let shadow = S_SpotShadowFactor_Depth(
                             properties.shadowsEnabled != 0u, properties.softShadows != 0u, properties.shadowBias, fragment_position,
                             properties.lightViewProjMatrix, properties.shadowMapInvSize, spotShadowTexture_tex, spotShadowTexture_samp);
-                        let final_shadow = mix(1.0, shadow, properties.shadowAlpha);
+                        // A traced shadow, when the renderer has one for this light, replaces the shadow map.
+                        // It is sampled either way: sampling is not allowed under a condition here.
+                        let traced_shadow = textureSample(tracedShadowTexture_tex, tracedShadowTexture_samp, tex_coord).r;
+                        let final_shadow = mix(1.0, select(shadow, traced_shadow, properties.tracedShadows != 0u), properties.shadowAlpha);
 
                         var cookie_attenuation = vec4f(1.0);
                         if (properties.cookieEnabled != 0u) {

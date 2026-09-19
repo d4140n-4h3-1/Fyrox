@@ -866,7 +866,11 @@ impl Visit for UserInterface {
         self.standard_material
             .visit("StandardMaterial", &mut region)?;
         self.render_mode.visit("RenderMode", &mut region)?;
-        Log::verify(self.user_data.visit("UserData", &mut region));
+        // Files saved before user data existed have no such region, which is fine.
+        match self.user_data.visit("UserData", &mut region) {
+            Err(VisitError::RegionDoesNotExist(_)) if region.is_reading() => {}
+            result => Log::verify(result),
+        }
 
         if region.is_reading() {
             for node in self.nodes.iter() {

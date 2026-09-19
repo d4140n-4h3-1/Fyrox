@@ -80,6 +80,8 @@ pub mod geometry_buffer;
 pub mod program;
 /// GPU query stub implementation.
 pub mod query;
+/// Ray tracing against scene geometry, where the hardware supports it.
+pub mod raytracing;
 /// Async pixel readback buffer implementation.
 pub mod read_buffer;
 /// Texture sampler implementation.

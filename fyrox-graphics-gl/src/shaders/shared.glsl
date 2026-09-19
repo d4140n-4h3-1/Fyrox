@@ -260,8 +260,11 @@ in sampler2D spotShadowTexture)
 
             float step = 0.5;
             float kernelHalfSize = 2.0;
-            float kernelSize = 2.0 * kernelHalfSize;
-            float totalSamples = pow(kernelSize / step, 2.0);
+            // The loops below run from -kernelHalfSize to +kernelHalfSize inclusive, so there is
+            // one more sample per axis than the span divided by the step. Dividing by too few
+            // samples used to push the penumbra to full shadow early and harden the edge.
+            float samplesPerAxis = 2.0 * kernelHalfSize / step + 1.0;
+            float totalSamples = samplesPerAxis * samplesPerAxis;
 
             for (float y = -kernelHalfSize; y <= kernelHalfSize; y += step)
             {

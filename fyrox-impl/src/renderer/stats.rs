@@ -41,6 +41,8 @@ pub struct LightingStatistics {
     pub spot_shadow_maps_rendered: usize,
     /// How many directional lights were rendered.
     pub directional_lights_rendered: usize,
+    /// How many lights had their shadows traced rather than drawn from shadow maps.
+    pub traced_shadows_rendered: usize,
 }
 
 impl AddAssign for LightingStatistics {
@@ -51,6 +53,7 @@ impl AddAssign for LightingStatistics {
         self.spot_shadow_maps_rendered += rhs.spot_shadow_maps_rendered;
         self.directional_lights_rendered += rhs.directional_lights_rendered;
         self.csm_rendered += rhs.csm_rendered;
+        self.traced_shadows_rendered += rhs.traced_shadows_rendered;
     }
 }
 
@@ -64,13 +67,15 @@ impl Display for LightingStatistics {
             \tDirectional Lights: {}\n\
             \tPoint Shadow Maps: {}\n\
             \tSpot Shadow Maps: {}\n\
-            \tSpot Shadow Maps: {}\n",
+            \tSpot Shadow Maps: {}\n\
+            \tTraced Shadows: {}\n",
             self.point_lights_rendered,
             self.spot_lights_rendered,
             self.directional_lights_rendered,
             self.point_shadow_maps_rendered,
             self.spot_shadow_maps_rendered,
-            self.csm_rendered
+            self.csm_rendered,
+            self.traced_shadows_rendered
         )
     }
 }

@@ -23,6 +23,7 @@
 
 use crate::scene::node::constructor::NodeConstructor;
 use crate::{
+    core::log::Log,
     core::{
         math::aabb::AxisAlignedBoundingBox,
         pool::Handle,
@@ -31,7 +32,9 @@ use crate::{
         variable::InheritableVariable,
         visitor::prelude::*,
     },
-    generic_animation::value::{BoundValueCollection, TrackValue, ValueBinding},
+    generic_animation::value::{
+        BoundValue, BoundValueCollection, TrackValue, ValueBinding, ValueType,
+    },
     scene::{
         base::{Base, BaseBuilder},
         graph::{Graph, NodePool},
@@ -172,8 +175,83 @@ impl BoundValueCollectionExt for BoundValueCollection {
                 ValueBinding::Property {
                     name: ref property_name,
                     value_type,
-                } => bound_value.apply_to_object(node_ref, property_name, value_type),
+                } => apply_property(bound_value, node_ref, property_name, value_type),
             }
+        }
+    }
+}
+
+/// Sets a property of a node from an animation track.
+///
+/// Scenes saved by older versions of the engine store property paths in older shapes, and these
+/// are still accepted:
+///
+/// - a node's content now sits behind the wrapper's `0` field, which old paths leave out
+///   (`base_light.intensity` means `0.base_light.intensity`);
+/// - the value inside an inheritable variable used to be called `Content` and is `Value` now;
+/// - old paths could also step straight through an inheritable variable
+///   (`base_light.color.r` means `0.base_light.color.Value.r`), and a track's plain value is
+///   written into the variable a path ends at (`0.base_light.intensity`).
+fn apply_property(
+    bound_value: &BoundValue,
+    node: &mut Node,
+    property_path: &str,
+    value_type: ValueType,
+) {
+    // Indexing syntax never appeared in the legacy shapes, so such paths go the regular way.
+    if property_path.contains('[') {
+        bound_value.apply_to_object(node, property_path, value_type);
+        return;
+    }
+
+    let segments = property_path.split('.').collect::<Vec<_>>();
+    let segments = match segments.first() {
+        Some(&"0") => &segments[1..],
+        _ => &segments[..],
+    };
+
+    let mut applied = false;
+    node.0.find_field_mut("", &mut |_| ());
+    resolve_lenient(&mut *node.0, segments, &mut |property| {
+        applied = bound_value.value.apply_to_any(property, value_type);
+    });
+    if !applied {
+        Log::err(format!(
+            "Failed to set property {property_path}! It does not exist or has a different type."
+        ));
+    }
+}
+
+/// Follows `segments` through `object` the way [`apply_property`] describes.
+fn resolve_lenient(
+    object: &mut dyn Reflect,
+    segments: &[&str],
+    func: &mut dyn FnMut(&mut dyn Reflect),
+) {
+    let Some((first, rest)) = segments.split_first() else {
+        // Tracks carry plain values, so a wrapper at the end of the path is looked through too.
+        if let Some(variable) = object.as_inheritable_variable_mut() {
+            variable.mark_modified();
+            resolve_lenient(variable.inner_value_mut(), segments, func);
+            return;
+        }
+        func(object);
+        return;
+    };
+    let name = if *first == "Content" { "Value" } else { first };
+
+    let mut found = false;
+    object.find_field_mut(name, &mut |field| {
+        if let Some(field) = field {
+            found = true;
+            resolve_lenient(field, rest, func);
+        }
+    });
+
+    if !found {
+        if let Some(variable) = object.as_inheritable_variable_mut() {
+            variable.mark_modified();
+            resolve_lenient(variable.inner_value_mut(), segments, func);
         }
     }
 }
@@ -387,5 +465,92 @@ impl AnimationPlayerBuilder {
     /// Creates an instance of [`AnimationPlayer`] node and adds it to the given scene graph.
     pub fn build(self, graph: &mut Graph) -> Handle<Node> {
         graph.add_node(self.build_node())
+    }
+}
+
+#[cfg(test)]
+mod legacy_path_test {
+    use super::apply_property;
+    use crate::{
+        core::color::Color,
+        generic_animation::value::{BoundValue, TrackValue, ValueBinding, ValueType},
+        scene::{
+            base::BaseBuilder,
+            light::{point::PointLight, point::PointLightBuilder, BaseLightBuilder},
+            node::Node,
+            pivot::PivotBuilder,
+        },
+    };
+
+    fn apply(node: &mut Node, path: &str, value: TrackValue, value_type: ValueType) {
+        let bound = BoundValue {
+            binding: ValueBinding::Property {
+                name: path.into(),
+                value_type,
+            },
+            value,
+        };
+        apply_property(&bound, node, path, value_type);
+    }
+
+    fn light(node: &Node) -> &PointLight {
+        node.cast::<PointLight>().unwrap()
+    }
+
+    #[test]
+    fn current_and_legacy_paths_are_applied() {
+        let mut node =
+            PointLightBuilder::new(BaseLightBuilder::new(BaseBuilder::new())).build_node();
+
+        apply(
+            &mut node,
+            "0.base_light.intensity",
+            TrackValue::Real(2.0),
+            ValueType::F32,
+        );
+        assert_eq!(light(&node).base_light_ref().intensity(), 2.0);
+
+        apply(
+            &mut node,
+            "base_light.intensity",
+            TrackValue::Real(3.0),
+            ValueType::F32,
+        );
+        assert_eq!(light(&node).base_light_ref().intensity(), 3.0);
+
+        apply(
+            &mut node,
+            "base_light.color.r",
+            TrackValue::Real(7.0),
+            ValueType::U8,
+        );
+        assert_eq!(
+            light(&node).base_light_ref().color(),
+            Color::from_rgba(7, 255, 255, 255)
+        );
+
+        apply(
+            &mut node,
+            "0.base_light.base.enabled.Content",
+            TrackValue::Real(0.0),
+            ValueType::Bool,
+        );
+        assert!(!node.is_enabled());
+
+        let mut pivot = PivotBuilder::new(BaseBuilder::new()).build_node();
+        apply(
+            &mut pivot,
+            "base.enabled",
+            TrackValue::Real(0.0),
+            ValueType::Bool,
+        );
+        assert!(!pivot.is_enabled());
+        apply(
+            &mut pivot,
+            "0.base.enabled.Content",
+            TrackValue::Real(1.0),
+            ValueType::Bool,
+        );
+        assert!(pivot.is_enabled());
     }
 }

@@ -2049,18 +2049,25 @@ impl Engine {
                             node_handle,
                             method_name,
                         } => {
-                            let node_name = context
+                            let node = context
                                 .scenes
                                 .try_get(scene_handle)
                                 .ok()
-                                .and_then(|scene| {
-                                    scene.graph.try_get(node_handle).ok().map(|n| n.name())
+                                .and_then(|scene| scene.graph.try_get(node_handle).ok());
+                            let node_name = node.map(|n| n.name()).unwrap_or("<undefined>");
+                            // A node can carry several scripts; naming them tells which one failed.
+                            let scripts = node
+                                .map(|n| {
+                                    n.scripts()
+                                        .map(|script| (**script).type_info_ref().type_name)
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
                                 })
-                                .unwrap_or("<undefined>");
+                                .unwrap_or_default();
 
                             err!(
                                 "An error occurred during {method_name} call in {node_handle} \
-                            node (name: {node_name}). Reason: {}",
+                            node (name: {node_name}, scripts: [{scripts}]). Reason: {}",
                                 container.error
                             );
                         }

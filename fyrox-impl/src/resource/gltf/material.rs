@@ -271,6 +271,21 @@ async fn import_material(
     ))
 }
 
+/// The material for a primitive that names none.
+///
+/// The glTF specification's default material is a white metal, which Fyrox's lighting renders
+/// almost black wherever there is no environment to reflect. Modelling tools show such geometry
+/// as plain, rough, non-metallic white, so that is what it gets here instead.
+pub fn default_material() -> MaterialResource {
+    let mut result = Material::from_shader(GLTF_SHADER.resource.clone());
+    set_material_color(&mut result, "diffuseColor", Color::WHITE);
+    // The shader's own default makes a surface glow; one without a material does not.
+    set_material_vector3(&mut result, "emissionStrength", [0.0; 3]);
+    set_material_scalar(&mut result, "metallicFactor", 0.0);
+    set_material_scalar(&mut result, "roughnessFactor", 1.0);
+    MaterialResource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, result)
+}
+
 fn set_material_scalar(material: &mut Material, name: &'static str, value: f32) {
     let value: MaterialProperty = MaterialProperty::Float(value);
     material.set_property(name, value);

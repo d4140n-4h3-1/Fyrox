@@ -147,8 +147,19 @@ fn cubemap_face_to_layer(face: CubeMapFace) -> u32 {
     }
 }
 
+/// The format a render pass writes an attachment in. sRGB textures are written through a linear
+/// view: the OpenGL backend never enables `GL_FRAMEBUFFER_SRGB`, so it stores shader output in
+/// them unconverted, and the engine's shaders and assets are tuned to that. Writing through an
+/// sRGB view instead would encode the output and make everything drawn into such targets (UI
+/// screens, for example) much lighter than on OpenGL.
+fn render_format(format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+    format.remove_srgb_suffix()
+}
+
 fn texture_format_for_attachment(tex: &GpuTexture) -> Option<wgpu::TextureFormat> {
-    Some(tex.as_any().downcast_ref::<WgpuTexture>()?.format())
+    Some(render_format(
+        tex.as_any().downcast_ref::<WgpuTexture>()?.format(),
+    ))
 }
 
 /// The part of [`DrawParameters`] that is baked into a pipeline. The scissor box and the stencil
@@ -426,29 +437,32 @@ impl WgpuFrameBuffer {
             wgpu::StencilState::default()
         };
 
-        let depth_stencil =
-            if params.depth_test.is_some() || params.depth_write || effective_stencil {
-                Some(wgpu::DepthStencilState {
-                    format: depth_fmt,
-                    depth_write_enabled: Some(params.depth_write),
-                    depth_compare: Some(
-                        params
-                            .depth_test
-                            .map(compare_func_to_wgpu)
-                            .unwrap_or(wgpu::CompareFunction::Always),
-                    ),
-                    stencil: wgpu_stencil_state,
-                    bias: wgpu::DepthBiasState::default(),
-                })
-            } else {
-                df.map(|f| wgpu::DepthStencilState {
-                    format: f,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                })
-            };
+        // A pipeline may only describe a depth-stencil state when the pass it runs in actually has
+        // such an attachment; wgpu rejects the draw otherwise.
+        let depth_stencil = if df.is_none() {
+            None
+        } else if params.depth_test.is_some() || params.depth_write || effective_stencil {
+            Some(wgpu::DepthStencilState {
+                format: depth_fmt,
+                depth_write_enabled: Some(params.depth_write),
+                depth_compare: Some(
+                    params
+                        .depth_test
+                        .map(compare_func_to_wgpu)
+                        .unwrap_or(wgpu::CompareFunction::Always),
+                ),
+                stencil: wgpu_stencil_state,
+                bias: wgpu::DepthBiasState::default(),
+            })
+        } else {
+            df.map(|f| wgpu::DepthStencilState {
+                format: f,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            })
+        };
 
         let cull = match params.cull_face {
             Some(CullFace::Back) => Some(wgpu::Face::Back),
@@ -818,10 +832,13 @@ impl WgpuFrameBuffer {
 fn attachment_view(att: &Attachment) -> wgpu::TextureView {
     let texture = att.texture.as_any().downcast_ref::<WgpuTexture>().unwrap();
     let level = att.level() as u32;
+    let format = texture.format();
+    let view_format = (render_format(format) != format).then(|| render_format(format));
     match att.cube_map_face() {
         Some(face) => texture
             .wgpu_texture()
             .create_view(&wgpu::TextureViewDescriptor {
+                format: view_format,
                 dimension: Some(wgpu::TextureViewDimension::D2),
                 base_array_layer: cubemap_face_to_layer(face),
                 array_layer_count: Some(1),
@@ -829,13 +846,19 @@ fn attachment_view(att: &Attachment) -> wgpu::TextureView {
                 mip_level_count: Some(1),
                 ..Default::default()
             }),
-        None if level != 0 || texture.wgpu_texture().mip_level_count() > 1 => texture
-            .wgpu_texture()
-            .create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: level,
-                mip_level_count: Some(1),
-                ..Default::default()
-            }),
+        None if level != 0
+            || texture.wgpu_texture().mip_level_count() > 1
+            || view_format.is_some() =>
+        {
+            texture
+                .wgpu_texture()
+                .create_view(&wgpu::TextureViewDescriptor {
+                    format: view_format,
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+        }
         None => texture.wgpu_view().clone(),
     }
 }

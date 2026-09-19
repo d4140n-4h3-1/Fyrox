@@ -203,6 +203,24 @@ pub struct Observer {
 }
 
 impl Observer {
+    /// Shifts what the observer sees by a fraction of a pixel, `pixels` across and up. The
+    /// projection is moved after the perspective divide, so every point on screen moves by the
+    /// same amount; culling is left alone, since nothing moves by more than a pixel.
+    pub fn jitter(&mut self, pixels: Vector2<f32>) {
+        let size = self.viewport.size;
+        if size.x <= 0 || size.y <= 0 || pixels == Vector2::zeros() {
+            return;
+        }
+        let shift = Matrix4::new_translation(&Vector3::new(
+            2.0 * pixels.x / size.x as f32,
+            2.0 * pixels.y / size.y as f32,
+            0.0,
+        ));
+        self.position.projection_matrix = shift * self.position.projection_matrix;
+        self.position.view_projection_matrix =
+            self.position.projection_matrix * self.position.view_matrix;
+    }
+
     /// Creates a new observer from a scene camera.
     pub fn from_camera(camera: &Camera, mut frame_size: Vector2<f32>) -> Self {
         if let Some(render_target) = camera.render_target() {

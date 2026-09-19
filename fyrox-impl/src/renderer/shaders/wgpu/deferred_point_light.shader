@@ -27,6 +27,11 @@
             binding: 4
         ),
         (
+            name: "tracedShadowTexture",
+            kind: Texture(kind: Sampler2D, fallback: White),
+            binding: 5
+        ),
+        (
             name: "properties",
             kind: PropertyGroup([
                 (name: "worldViewProjection", kind: Matrix4()),
@@ -40,6 +45,7 @@
                 (name: "shadowAlpha", kind: Float()),
                 (name: "softShadows", kind: Bool()),
                 (name: "shadowsEnabled", kind: Bool()),
+                (name: "tracedShadows", kind: Bool()),
             ]),
             binding: 0
         ),
@@ -130,7 +136,10 @@
 
                         let shadow = S_PointShadow(
                             properties.shadowsEnabled != 0u, properties.softShadows != 0u, dist, properties.shadowBias, ctx.fragmentToLight, pointShadowTexture_tex, pointShadowTexture_samp);
-                        let final_shadow = mix(1.0, shadow, properties.shadowAlpha);
+                        // A traced shadow, when the renderer has one for this light, replaces the shadow map.
+                        // It is sampled either way: sampling is not allowed under a condition here.
+                        let traced_shadow = textureSample(tracedShadowTexture_tex, tracedShadowTexture_samp, tex_coord).r;
+                        let final_shadow = mix(1.0, select(shadow, traced_shadow, properties.tracedShadows != 0u), properties.shadowAlpha);
 
                         return vec4f(properties.lightIntensity * distance_attenuation * final_shadow * lighting, diffuse_color.a);
                     }

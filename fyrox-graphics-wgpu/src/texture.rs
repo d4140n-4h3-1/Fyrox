@@ -208,6 +208,7 @@ impl WgpuTexture {
         desc: GpuTextureDescriptor,
     ) -> Result<Self, FrameworkError> {
         let format = pixel_kind_to_wgpu_format(desc.pixel_kind);
+        let linear_format = format.remove_srgb_suffix();
         let dimension = texture_dimension(desc.kind);
         let (raw_w, raw_h, depth_or_layers) = texture_size(desc.kind);
         let width = raw_w.max(1);
@@ -236,7 +237,12 @@ impl WgpuTexture {
                     | wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
+                // sRGB textures are rendered into through a linear view; see `attachment_view`.
+                view_formats: if format.is_srgb() {
+                    std::slice::from_ref(&linear_format)
+                } else {
+                    &[]
+                },
             });
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor {

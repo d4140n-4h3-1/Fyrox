@@ -573,16 +573,16 @@ fn import_surface(
             ResourceKind::External,
             data,
         ));
-        if let Some(mat_index) = prim.material().index() {
-            surf.set_material(
+        // A primitive without a material still has geometry to show: it gets a default one.
+        match prim.material().index() {
+            Some(mat_index) => surf.set_material(
                 mats.get(mat_index)
                     .ok_or(GltfLoadError::InvalidIndex)?
                     .clone(),
-            );
-            Ok(Some((surf, blend_shapes)))
-        } else {
-            Ok(None)
+            ),
+            None => surf.set_material(material::default_material()),
         }
+        Ok(Some((surf, blend_shapes)))
     } else {
         Ok(None)
     }

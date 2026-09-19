@@ -2008,7 +2008,11 @@ impl Visit for Graph {
         self.physics2d.visit("PhysicsWorld2D", &mut region)?;
         self.lightmap.visit("Lightmap", &mut region)?;
 
-        Log::verify(self.user_data.visit("UserData", &mut region));
+        // Files saved before user data existed have no such region, which is fine.
+        match self.user_data.visit("UserData", &mut region) {
+            Err(VisitError::RegionDoesNotExist(_)) if region.is_reading() => {}
+            result => Log::verify(result),
+        }
 
         Ok(())
     }

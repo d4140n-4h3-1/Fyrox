@@ -34,14 +34,17 @@ use crate::{
         geometry_buffer::GpuGeometryBuffer,
         gpu_texture::{GpuTexture, GpuTextureKind},
         server::GraphicsServer,
-        ColorMask, CompareFunc, CullFace, DrawParameters, ElementRange, StencilAction, StencilFunc,
+        ColorMask, CompareFunc, CullFace, DrawParameters, ElementRange, ScissorBox, StencilAction,
+        StencilFunc,
         StencilOp,
     },
     include_bytes_align_as,
     renderer::{
         bundle::{LightSourceKind, RenderDataBundleStorage},
         cache::{
-            shader::{binding, property, PropertyGroup, RenderMaterial, ShaderCache},
+            shader::{
+                binding, property, PropertyGroup, RenderMaterial, RenderPassContainer, ShaderCache,
+            },
             uniform::{UniformBufferCache, UniformMemoryAllocator},
             DynamicSurfaceCache,
         },
@@ -57,6 +60,7 @@ use crate::{
             spot::SpotShadowMapRenderer,
         },
         ssao::ScreenSpaceAmbientOcclusionRenderer,
+        traced_shadows::{LightShadowTraceContext, LightShadowTracer},
         utils::make_brdf_lut,
         visibility::ObserverVisibilityCache,
         GeometryCache, LightingStatistics, QualitySettings, RenderPassStatistics, TextureCache,
@@ -106,6 +110,67 @@ pub(crate) struct DeferredRendererContext<'a> {
     pub environment_map_specular_convolution: &'a mut Option<EnvironmentMapSpecularConvolution>,
     pub environment_map_irradiance_convolution: &'a EnvironmentMapIrradianceConvolution,
     pub need_recalculate_convolution: &'a mut bool,
+    pub light_shadow_tracer: Option<&'a mut (dyn LightShadowTracer + 'static)>,
+}
+
+/// The part of the screen a light can possibly reach: the screen-space bounds of the sphere that
+/// contains its volume, in the scissor box's coordinates (origin at the bottom left).
+///
+/// Lighting is drawn as a full-screen quad per light, so without this every light on screen costs
+/// a full screen of fragments even when it lights a few pixels in the distance. Returns [`None`]
+/// when the whole viewport has to be drawn - when the sphere encloses the camera, or reaches
+/// behind it, in which case its projection is not a rectangle.
+fn light_scissor_box(
+    viewport: Rect<i32>,
+    view_projection: &Matrix4<f32>,
+    observer_position: Vector3<f32>,
+    center: Vector3<f32>,
+    radius: f32,
+) -> Option<ScissorBox> {
+    if (observer_position - center).norm() <= radius {
+        return None;
+    }
+
+    let mut min = Vector2::repeat(f32::MAX);
+    let mut max = Vector2::repeat(f32::MIN);
+    for i in 0..8 {
+        let corner = center
+            + Vector3::new(
+                if i & 1 == 0 { -radius } else { radius },
+                if i & 2 == 0 { -radius } else { radius },
+                if i & 4 == 0 { -radius } else { radius },
+            );
+        // As a point: a vector's homogeneous form has w = 0, which would drop the translation.
+        let clip = view_projection * Point3::from(corner).to_homogeneous();
+        if clip.w <= f32::EPSILON {
+            // The volume crosses the plane of the camera; its projection is not a rectangle.
+            return None;
+        }
+        let ndc = clip.xy() / clip.w;
+        min = min.inf(&ndc);
+        max = max.sup(&ndc);
+    }
+
+    let to_pixels = |ndc: Vector2<f32>| {
+        Vector2::new(
+            viewport.position.x as f32 + (ndc.x * 0.5 + 0.5) * viewport.size.x as f32,
+            viewport.position.y as f32 + (ndc.y * 0.5 + 0.5) * viewport.size.y as f32,
+        )
+    };
+    let low = to_pixels(min);
+    let high = to_pixels(max);
+
+    // A pixel of slack, so nothing is lost to rounding at the edges.
+    let x0 = (low.x.floor() as i32 - 1).max(viewport.position.x);
+    let y0 = (low.y.floor() as i32 - 1).max(viewport.position.y);
+    let x1 = (high.x.ceil() as i32 + 1).min(viewport.position.x + viewport.size.x);
+    let y1 = (high.y.ceil() as i32 + 1).min(viewport.position.y + viewport.size.y);
+    Some(ScissorBox {
+        x: x0,
+        y: y0,
+        width: (x1 - x0).max(0),
+        height: (y1 - y0).max(0),
+    })
 }
 
 impl DeferredLightRenderer {
@@ -284,6 +349,7 @@ impl DeferredLightRenderer {
             environment_map_specular_convolution,
             environment_map_irradiance_convolution,
             need_recalculate_convolution,
+            mut light_shadow_tracer,
         } = args;
 
         let viewport = Rect::new(0, 0, gbuffer.width, gbuffer.height);
@@ -692,6 +758,54 @@ impl DeferredLightRenderer {
                 }
             }
 
+            // Lighting only has to be drawn where this light can reach.
+            let scissor = match light.kind {
+                LightSourceKind::Directional { .. } | LightSourceKind::Unknown => None,
+                LightSourceKind::Point { .. } | LightSourceKind::Spot { .. } => light_scissor_box(
+                    viewport,
+                    &observer.position.view_projection_matrix,
+                    observer.position.translation,
+                    light.position,
+                    light_radius,
+                ),
+            };
+
+            // A traced shadow replaces the light's shadow map. It costs rays for the pixels the
+            // light reaches rather than a render of the scene, so it is not limited to the lights
+            // near the camera the way shadow maps are.
+            let wants_shadows = light.cast_shadows
+                && match light.kind {
+                    LightSourceKind::Spot { .. } => settings.spot_shadows_enabled,
+                    LightSourceKind::Point { .. } => settings.point_shadows_enabled,
+                    LightSourceKind::Directional { .. } => settings.csm_settings.enabled,
+                    LightSourceKind::Unknown => false,
+                };
+            let traced_shadow = match light_shadow_tracer.as_deref_mut() {
+                Some(tracer) if needs_lighting && wants_shadows => {
+                    tracer.trace(LightShadowTraceContext {
+                        server,
+                        scene,
+                        depth: gbuffer_depth_map,
+                        normals: gbuffer_normal_map,
+                        inv_view_projection,
+                        light,
+                        light_radius,
+                        viewport,
+                        scissor,
+                    })?
+                }
+                _ => None,
+            };
+            let traced_shadows = traced_shadow.is_some();
+            if traced_shadows {
+                light_stats.traced_shadows_rendered += 1;
+            }
+            let shadows_enabled = shadows_enabled && !traced_shadows;
+            let shadows_alpha = if traced_shadows { 1.0 } else { shadows_alpha };
+            let traced_shadow_texture = traced_shadow
+                .as_ref()
+                .unwrap_or(&renderer_resources.white_dummy);
+
             if needs_lighting && shadows_enabled {
                 match light.kind {
                     LightSourceKind::Spot {
@@ -786,6 +900,12 @@ impl DeferredLightRenderer {
 
             if needs_lighting {
                 let quad = &renderer_resources.quad;
+                let scissored = |shaders: &RenderPassContainer| -> Option<DrawParameters> {
+                    let scissor = scissor?;
+                    let mut params = shaders.get(&ImmutableString::new("Primary")).ok()?.draw_params.clone();
+                    params.scissor_box = Some(scissor);
+                    Some(params)
+                };
                 let color = light.color.srgb_to_linear_f32();
 
                 pass_stats += match light.kind {
@@ -845,6 +965,7 @@ impl DeferredLightRenderer {
                             property("cookieEnabled", &cookie_enabled),
                             property("shadowsEnabled", &shadows_enabled),
                             property("softShadows", &settings.spot_soft_shadows),
+                            property("tracedShadows", &traced_shadows),
                         ]);
                         let material = RenderMaterial::from([
                             binding(
@@ -880,6 +1001,13 @@ impl DeferredLightRenderer {
                                 ),
                             ),
                             binding("cookieTexture", cookie_texture),
+                            binding(
+                                "tracedShadowTexture",
+                                (
+                                    traced_shadow_texture,
+                                    &renderer_resources.nearest_clamp_sampler,
+                                ),
+                            ),
                             binding("properties", &properties),
                         ]);
 
@@ -892,7 +1020,7 @@ impl DeferredLightRenderer {
                             &material,
                             uniform_buffer_cache,
                             Default::default(),
-                            None,
+                            scissored(&renderer_resources.shaders.spot_light).as_ref(),
                         )?
                     }
                     LightSourceKind::Point { shadow_bias, .. } => {
@@ -910,6 +1038,7 @@ impl DeferredLightRenderer {
                             property("shadowAlpha", &shadows_alpha),
                             property("shadowsEnabled", &shadows_enabled),
                             property("softShadows", &settings.point_soft_shadows),
+                            property("tracedShadows", &traced_shadows),
                         ]);
                         let material = RenderMaterial::from([
                             binding(
@@ -945,6 +1074,13 @@ impl DeferredLightRenderer {
                                     &renderer_resources.nearest_clamp_sampler,
                                 ),
                             ),
+                            binding(
+                                "tracedShadowTexture",
+                                (
+                                    traced_shadow_texture,
+                                    &renderer_resources.nearest_clamp_sampler,
+                                ),
+                            ),
                             binding("properties", &properties),
                         ]);
 
@@ -957,7 +1093,7 @@ impl DeferredLightRenderer {
                             &material,
                             uniform_buffer_cache,
                             Default::default(),
-                            None,
+                            scissored(&renderer_resources.shaders.point_light).as_ref(),
                         )?
                     }
                     LightSourceKind::Directional { ref csm_options } => {
@@ -987,6 +1123,7 @@ impl DeferredLightRenderer {
                             property("shadowBias", &shadow_bias),
                             property("softShadows", &settings.csm_settings.pcf),
                             property("cascadeDistances", distances.as_slice()),
+                            property("tracedShadows", &traced_shadows),
                         ]);
                         let cascades = self.csm_renderer.cascades();
                         let material = RenderMaterial::from([
@@ -1033,6 +1170,13 @@ impl DeferredLightRenderer {
                                 "shadowCascade2",
                                 (
                                     cascades[2].texture(),
+                                    &renderer_resources.nearest_clamp_sampler,
+                                ),
+                            ),
+                            binding(
+                                "tracedShadowTexture",
+                                (
+                                    traced_shadow_texture,
                                     &renderer_resources.nearest_clamp_sampler,
                                 ),
                             ),

@@ -250,8 +250,11 @@ fn S_SpotShadowFactor(
 
             let stepSize = 0.5;
             let kernelHalfSize = 2.0;
-            let kernelSize = 2.0 * kernelHalfSize;
-            let totalSamples = pow(kernelSize / stepSize, 2.0);
+            // The loops below run from -kernelHalfSize to +kernelHalfSize inclusive, so there is
+            // one more sample per axis than the span divided by the step. Dividing by too few
+            // samples used to push the penumbra to full shadow early and harden the edge.
+            let samplesPerAxis = 2.0 * kernelHalfSize / stepSize + 1.0;
+            let totalSamples = samplesPerAxis * samplesPerAxis;
 
             var y = -kernelHalfSize;
             loop {
@@ -330,8 +333,11 @@ fn S_SpotShadowFactor_Depth(
             var accumulator = 0.0;
             let stepSize = 0.5;
             let kernelHalfSize = 2.0;
-            let kernelSize = 2.0 * kernelHalfSize;
-            let totalSamples = pow(kernelSize / stepSize, 2.0);
+            // The loops below run from -kernelHalfSize to +kernelHalfSize inclusive, so there is
+            // one more sample per axis than the span divided by the step. Dividing by too few
+            // samples used to push the penumbra to full shadow early and harden the edge.
+            let samplesPerAxis = 2.0 * kernelHalfSize / stepSize + 1.0;
+            let totalSamples = samplesPerAxis * samplesPerAxis;
             var y = -kernelHalfSize;
             loop {
                 if (y > kernelHalfSize) { break; }

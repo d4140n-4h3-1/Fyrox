@@ -33,6 +33,7 @@ pub mod observer;
 pub mod resources;
 pub mod stats;
 pub mod storage;
+pub mod traced_shadows;
 pub mod ui_renderer;
 pub mod utils;
 pub mod visibility;
@@ -50,6 +51,7 @@ mod shadow;
 mod ssao;
 
 use crate::renderer::hdr::HdrRendererArgs;
+use crate::renderer::traced_shadows::LightShadowTracer;
 use crate::{
     asset::{event::ResourceEvent, manager::ResourceManager},
     core::{
@@ -414,6 +416,11 @@ pub fn make_deferred_viewport_matrix(viewport: Rect<i32>) -> Matrix4<f32> {
 pub struct Renderer {
     backbuffer: GpuFrameBuffer,
     scene_render_passes: Vec<Rc<RefCell<dyn SceneRenderPass>>>,
+    /// Makes shadows for lights in place of shadow maps, when set.
+    light_shadow_tracer: Option<Box<dyn LightShadowTracer>>,
+    /// How far every camera's view is shifted this frame, in pixels. See
+    /// [`Renderer::set_projection_jitter`].
+    projection_jitter: Vector2<f32>,
     deferred_light_renderer: DeferredLightRenderer,
     /// A set of textures of certain kinds that could be used as a stub in cases when you don't have
     /// your own texture of this kind.
@@ -705,12 +712,33 @@ impl Renderer {
             texture_event_receiver,
             shader_cache,
             scene_render_passes: Default::default(),
+            light_shadow_tracer: None,
+            projection_jitter: Vector2::zeros(),
             uniform_buffer_cache: UniformBufferCache::new(server.clone()),
             server,
             visibility_cache: Default::default(),
             uniform_memory_allocator,
             dynamic_surface_cache: DynamicSurfaceCache::new(),
         })
+    }
+
+    /// Sets what makes shadows for lights in place of shadow maps, or [`None`] to go back to shadow
+    /// maps. See [`traced_shadows`] for how it fits into the frame.
+    pub fn set_light_shadow_tracer(&mut self, tracer: Option<Box<dyn LightShadowTracer>>) {
+        self.light_shadow_tracer = tracer;
+    }
+
+    /// Shifts what every camera sees by a fraction of a pixel, from the next frame on, until set
+    /// again. Temporal anti-aliasing moves the view a little differently every frame and blends
+    /// the frames together, which is what smooths edges that are too fine to stay put from one
+    /// frame to the next.
+    pub fn set_projection_jitter(&mut self, pixels: Vector2<f32>) {
+        self.projection_jitter = pixels;
+    }
+
+    /// Whether shadows are made by a [`LightShadowTracer`] rather than by shadow maps.
+    pub fn has_light_shadow_tracer(&self) -> bool {
+        self.light_shadow_tracer.is_some()
     }
 
     /// Adds a custom render pass.
@@ -1076,6 +1104,10 @@ impl Renderer {
 
         render_data.copy_depth_stencil_to_scene_framebuffer();
 
+        if let Some(tracer) = self.light_shadow_tracer.as_deref_mut() {
+            tracer.prepare(server, scene_handle, scene)?;
+        }
+
         render_data.hdr_scene_framebuffer.clear(
             observer.viewport,
             Some(
@@ -1122,6 +1154,7 @@ impl Renderer {
                     environment_map_irradiance_convolution: &render_data
                         .environment_map_irradiance_convolution,
                     need_recalculate_convolution: &mut render_data.need_recalculate_convolution,
+                    light_shadow_tracer: self.light_shadow_tracer.as_deref_mut(),
                 })?;
 
         render_data.statistics += light_stats;
@@ -1217,8 +1250,21 @@ impl Renderer {
                 &mut self.uniform_buffer_cache,
                 &self.renderer_resources,
             )?;
-            std::mem::swap(&mut dest_buf, &mut src_buf);
+        } else {
+            // A copy instead, to keep the number of full-screen passes between the scene and the
+            // back buffer the same either way. Each of these passes flips the image on backends
+            // whose render targets are stored top row first (wgpu), and the flips only cancel out
+            // in pairs - so leaving one out turns the whole frame upside down.
+            render_data.statistics += blit_pixels(
+                &mut self.uniform_buffer_cache,
+                &render_data.ldr_temp_framebuffer[dest_buf],
+                render_data.ldr_temp_frame_texture(src_buf),
+                &self.renderer_resources.shaders.blit,
+                observer.viewport,
+                &self.renderer_resources,
+            )?;
         }
+        std::mem::swap(&mut dest_buf, &mut src_buf);
 
         render_data.statistics += blit_pixels(
             &mut self.uniform_buffer_cache,
@@ -1366,7 +1412,10 @@ impl Renderer {
             .camera_data
             .retain(|h, _| graph.is_valid_handle(*h));
 
-        let observers = ObserversCollection::from_scene(scene, frame_size);
+        let mut observers = ObserversCollection::from_scene(scene, frame_size);
+        for camera in observers.cameras.iter_mut() {
+            camera.jitter(self.projection_jitter);
+        }
 
         // At first, render the reflection probes to off-screen render target.
         let mut need_recalculate_convolution = false;

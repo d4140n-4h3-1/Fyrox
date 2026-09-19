@@ -181,6 +181,8 @@ pub struct WgpuGraphicsServer {
     pub named_objects: bool,
     /// MSAA sample count (currently forced to 1).
     pub msaa_sample_count: u32,
+    /// Whether the device was created with ray tracing turned on.
+    pub ray_tracing: bool,
     /// Hash-based cache of render pipelines, keyed by [`PipelineKey`].
     pub pipeline_cache: RefCell<HashMap<PipelineKey, wgpu::RenderPipeline>>,
     /// Hash-based cache of bind groups, keyed by resource pointers and texture formats.
@@ -302,6 +304,14 @@ impl WgpuGraphicsServer {
             required_features |= wgpu::Features::POLYGON_MODE_LINE;
         }
 
+        // Ray tracing, where the hardware has it. Shaders can then trace rays against the scene's
+        // actual geometry rather than against what happens to be on screen. It is experimental in
+        // wgpu, so it is asked for only when the adapter offers it and never required.
+        let ray_tracing = adapter_features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        if ray_tracing {
+            required_features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        }
+
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,
             required_features,
@@ -311,6 +321,14 @@ impl WgpuGraphicsServer {
                 adapter.limits()
             },
             memory_hints: wgpu::MemoryHints::Performance,
+            // Ray tracing is behind this in wgpu: the caller has to say it accepts that the
+            // implementation is still work in progress. Nothing else is asked for from it.
+            experimental_features: if ray_tracing {
+                // SAFETY: only ray query is used, and only when the adapter reports it.
+                unsafe { wgpu::ExperimentalFeatures::enabled() }
+            } else {
+                wgpu::ExperimentalFeatures::disabled()
+            },
             ..Default::default()
         }))
         .map_err(|e| FrameworkError::Custom(format!("Failed to request device: {e}")))?;
@@ -405,6 +423,7 @@ impl WgpuGraphicsServer {
             surface_config: RwLock::new(surface_config),
             named_objects,
             msaa_sample_count: msaa,
+            ray_tracing,
             pipeline_cache: RefCell::new(HashMap::new()),
             bind_group_cache: RefCell::new(HashMap::new()),
             weak_self: RefCell::new(None),
