@@ -69,3 +69,15 @@ below 0 instead of -1 and stores render targets top row first.
   acceleration structure, and a self-contained pass traces one shadow ray per pixel into a mask
   texture. Nothing else in the renderer knows about it; an effect reads the mask as an ordinary
   texture. Off unless a game asks for it.
+- `resource/gltf/mod.rs`: meshes are imported in the document's own order, which is the order
+  nodes look them up in. They used to be gathered by walking the nodes, so a file whose nodes
+  did not list their meshes in that order had them mixed up - a character's body put on its eyes
+  node, and its eyes on the body - and a mesh shared by several nodes was imported once for each.
+- `resource/gltf/surface.rs`: a mesh without texture coordinates gets tangents at right angles
+  to its normals. It used to keep tangents of zero, which made the shader's normal zero too, so
+  the mesh was lit by next to nothing and came out black whatever its color.
+- `resource/gltf/animation.rs`: rotation keys are kept on one side of the quaternion sphere.
+  Exporters may write a key as `-q` rather than `q`, the same rotation; but rotations are
+  interpolated component by component, and between keys on opposite sides every component
+  passes through zero, so the bone spins through poses it was never keyed to. It showed as legs
+  that jerked for a frame a few times each time round a walk.

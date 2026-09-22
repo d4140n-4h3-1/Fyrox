@@ -24,7 +24,8 @@ use crate::core::algebra::{Vector2, Vector3, Vector4};
 use crate::fxhash::FxHashMap;
 use crate::scene::mesh;
 use crate::scene::mesh::buffer::{
-    self, TriangleBuffer, ValidationError, VertexBuffer, VertexTrait,
+    self, TriangleBuffer, ValidationError, VertexBuffer, VertexReadTrait as _, VertexTrait,
+    VertexWriteTrait as _,
 };
 use crate::scene::mesh::surface::{InputBlendShapeData, SurfaceData};
 use crate::scene::mesh::vertex::{AnimatedVertex, SimpleVertex, StaticVertex};
@@ -266,8 +267,38 @@ pub fn build_surface_data(
         surf.calculate_tangents()?;
     } else if has_tex && has_norm && !has_tang {
         surf.calculate_tangents()?;
+    } else if !has_tex && !has_tang {
+        tangents_from_normals(&mut surf)?;
     }
     Ok(Some(surf))
+}
+
+/// Gives every vertex a tangent at right angles to its normal, for a surface without texture
+/// coordinates to work tangents out from. It has no texture to line them up with, so any right
+/// angle does; what matters is that there is one. Left at zero, the shader's normal comes out
+/// zero too, and the surface is lit by nothing but a trace of ambient light, as good as black.
+fn tangents_from_normals(
+    surf: &mut SurfaceData,
+) -> std::result::Result<(), buffer::VertexFetchError> {
+    let mut vertices = surf.vertex_buffer.modify();
+    for mut view in vertices.iter_mut() {
+        let normal = view.read_3_f32(buffer::VertexAttributeUsage::Normal)?;
+        // Crossed with whichever axis it is furthest from, so the result is never near zero.
+        let axis = if normal.x.abs() < 0.9 {
+            Vector3::x()
+        } else {
+            Vector3::y()
+        };
+        let tangent = normal
+            .cross(&axis)
+            .try_normalize(f32::EPSILON)
+            .unwrap_or_else(Vector3::z);
+        view.write_4_f32(
+            buffer::VertexAttributeUsage::Tangent,
+            Vector4::new(tangent.x, tangent.y, tangent.z, 1.0),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "mesh_analysis")]

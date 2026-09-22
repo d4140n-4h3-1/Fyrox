@@ -628,11 +628,13 @@ where
         ReadOutputs::Rotations(iter) => iter.into_f32(),
         ReadOutputs::MorphTargetWeights(_) => return Err(()),
     };
+    let mut outputs: Vec<[f32; 4]> = out_iter.collect();
+    keep_to_one_side(outputs.iter_mut());
     let mut track = ImportedTrack::new(target);
     for i in 0..4 {
         let curve_keys: Vec<CurveKey> = inputs
             .clone()
-            .zip(out_iter.clone())
+            .zip(outputs.iter())
             .map(|(time, o)| CurveKey::new(time, o[i], kind.clone()))
             .collect::<Vec<_>>();
         track.curves[i] = curve_keys;
@@ -659,10 +661,22 @@ where
         ReadOutputs::Rotations(iter) => iter.into_f32(),
         ReadOutputs::MorphTargetWeights(_) => return Err(()),
     };
+    let mut keys: Vec<(f32, [[f32; 4]; 3])> = iter_cubic_data(inputs, out_iter).collect();
+    // A key turned to the other side takes its tangents with it.
+    let mut previous: Option<[f32; 4]> = None;
+    for (_, [in_tang, value, out_tang]) in keys.iter_mut() {
+        if previous.is_some_and(|p| dot4(&p, value) < 0.0) {
+            for q in [&mut *in_tang, &mut *value, &mut *out_tang] {
+                q.iter_mut().for_each(|c| *c = -*c);
+            }
+        }
+        previous = Some(*value);
+    }
     let mut track = ImportedTrack::new(target);
     for i in 0..4 {
-        let curve_keys: Vec<CurveKey> = iter_cubic_data(inputs.clone(), out_iter.clone())
-            .map(|(time, o)| {
+        let curve_keys: Vec<CurveKey> = keys
+            .iter()
+            .map(|&(time, o)| {
                 let (in_tang, value, out_tang) = (o[0], o[1], o[2]);
                 CurveKey::new(
                     time,
@@ -677,6 +691,25 @@ where
         track.curves[i] = curve_keys;
     }
     Ok(track)
+}
+
+fn dot4(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Turns each rotation to whichever of its two equal quaternions, `q` or `-q`, is on the same
+/// side as the one before it. Exporters are free to switch sides between keys, and do; but the
+/// components are interpolated one by one, and between two keys on opposite sides every one of
+/// them passes through zero, so the node spins through rotations it was never keyed to - a
+/// limb that jerks for a frame each time round the animation.
+fn keep_to_one_side<'a>(rotations: impl Iterator<Item = &'a mut [f32; 4]>) {
+    let mut previous: Option<[f32; 4]> = None;
+    for q in rotations {
+        if previous.is_some_and(|p| dot4(&p, q) < 0.0) {
+            q.iter_mut().for_each(|c| *c = -*c);
+        }
+        previous = Some(*q);
+    }
 }
 
 impl CurvePoint for CurveKey {

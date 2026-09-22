@@ -452,12 +452,13 @@ fn import_meshes(
     mats: &[MaterialResource],
     bufs: &[Vec<u8>],
 ) -> Result<Vec<MeshData>> {
-    let mut result: Vec<MeshData> = Vec::with_capacity(gltf.nodes().len());
+    // In the document's own order: nodes look their mesh up by its index among the document's
+    // meshes. Going by the nodes instead mixes meshes up whenever the nodes do not list them in
+    // that order, and imports a mesh again for every node that shares it.
+    let mut result: Vec<MeshData> = Vec::with_capacity(gltf.meshes().len());
     let mut stats = GeometryStatistics::default();
-    for node in gltf.nodes() {
-        if let Some(mesh) = node.mesh() {
-            result.push(import_mesh(mesh, mats, bufs, &mut stats)?);
-        }
+    for mesh in gltf.meshes() {
+        result.push(import_mesh(mesh, mats, bufs, &mut stats)?);
     }
     if cfg!(feature = "mesh_analysis") {
         if stats.repeated_index_count > 0 {
