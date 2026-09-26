@@ -272,6 +272,7 @@ impl CsmRenderer {
                 DIRECTIONAL_SHADOW_PASS_NAME.clone(),
                 RenderDataBundleStorageOptions {
                     collect_lights: false,
+                    collect_environment: false,
                 },
                 dynamic_surface_cache,
             );

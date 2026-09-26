@@ -1072,6 +1072,7 @@ impl Renderer {
             GBUFFER_PASS_NAME.clone(),
             RenderDataBundleStorageOptions {
                 collect_lights: true,
+                collect_environment: true,
             },
             &mut self.dynamic_surface_cache,
         );

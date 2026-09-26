@@ -845,12 +845,17 @@ pub struct RenderDataBundleStorage {
 
 pub struct RenderDataBundleStorageOptions {
     pub collect_lights: bool,
+    /// Whether to look for the reflection probe the observer is in, for its environment map.
+    /// Looking costs a reflection query on every node, which passes that draw no reflections -
+    /// shadow maps - can do without.
+    pub collect_environment: bool,
 }
 
 impl Default for RenderDataBundleStorageOptions {
     fn default() -> Self {
         Self {
             collect_lights: true,
+            collect_environment: true,
         }
     }
 }
@@ -915,12 +920,14 @@ impl RenderDataBundleStorage {
                 }
             }
 
-            if let Some(reflection_probe) = node.self_or_field_ref::<ReflectionProbe>() {
-                if (reflection_probe as &dyn NodeTrait)
-                    .world_bounding_box()
-                    .is_contains_point(observer_position.translation)
-                {
-                    storage.environment_map = Some(reflection_probe.render_target().clone());
+            if options.collect_environment {
+                if let Some(reflection_probe) = node.self_or_field_ref::<ReflectionProbe>() {
+                    if (reflection_probe as &dyn NodeTrait)
+                        .world_bounding_box()
+                        .is_contains_point(observer_position.translation)
+                    {
+                        storage.environment_map = Some(reflection_probe.render_target().clone());
+                    }
                 }
             }
 

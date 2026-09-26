@@ -164,6 +164,43 @@ impl PointShadowMapRenderer {
         let light_projection_matrix =
             Matrix4::new_perspective(1.0, std::f32::consts::FRAC_PI_2, z_near, z_far);
 
+        // What the light reaches is gathered once, for all six faces, with a box around the
+        // light's sphere: walking the whole graph costs far more than drawing a face, and it
+        // used to be done for each face. Each face then draws it all with its own view, and the
+        // GPU clips away what that face does not see.
+        let reach_view_matrix = Matrix4::look_at_rh(
+            &Point3::from(light_pos),
+            &Point3::from(light_pos - Vector3::z()),
+            &Vector3::y(),
+        );
+        let reach_projection_matrix = Matrix4::new_orthographic(
+            -light_radius,
+            light_radius,
+            -light_radius,
+            light_radius,
+            -light_radius,
+            light_radius,
+        );
+        let mut bundle_storage = RenderDataBundleStorage::from_graph(
+            graph,
+            render_mask,
+            elapsed_time,
+            &ObserverPosition {
+                translation: light_pos,
+                z_near,
+                z_far,
+                view_matrix: reach_view_matrix,
+                projection_matrix: reach_projection_matrix,
+                view_projection_matrix: reach_projection_matrix * reach_view_matrix,
+            },
+            POINT_SHADOW_PASS_NAME.clone(),
+            RenderDataBundleStorageOptions {
+                collect_lights: false,
+                collect_environment: false,
+            },
+            dynamic_surface_cache,
+        );
+
         for face in self.faces.iter() {
             let _debug_scope = server.begin_scope(&format!("Face {:?}", face.face));
 
@@ -177,24 +214,14 @@ impl PointShadowMapRenderer {
                 &face.up,
             );
 
-            let bundle_storage = RenderDataBundleStorage::from_graph(
-                graph,
-                render_mask,
-                elapsed_time,
-                &ObserverPosition {
-                    translation: light_pos,
-                    z_near,
-                    z_far,
-                    view_matrix: light_view_matrix,
-                    projection_matrix: light_projection_matrix,
-                    view_projection_matrix: light_projection_matrix * light_view_matrix,
-                },
-                POINT_SHADOW_PASS_NAME.clone(),
-                RenderDataBundleStorageOptions {
-                    collect_lights: false,
-                },
-                dynamic_surface_cache,
-            );
+            bundle_storage.observer_position = ObserverPosition {
+                translation: light_pos,
+                z_near,
+                z_far,
+                view_matrix: light_view_matrix,
+                projection_matrix: light_projection_matrix,
+                view_projection_matrix: light_projection_matrix * light_view_matrix,
+            };
 
             statistics += bundle_storage.render_to_frame_buffer(
                 server,

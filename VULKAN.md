@@ -105,3 +105,15 @@ has to enable wgpu's `webgl` feature. This path had never run, and failed in six
   same element for every vertex; OpenGL reads it as tightly packed, so every vertex after the
   first read past the end of the buffer. Chromium clamps such reads; Firefox rejects the draw,
   and only the sky was drawn.
+
+**Shadow maps, faster.** Gathering what a pass draws (`RenderDataBundleStorage::from_graph`)
+walks the whole scene graph, and was most of a frame in a big scene lit with shadow maps.
+- `shadow/point.rs`: a point light's shadow gathers what the light reaches once, with a box
+  around its sphere, and draws that into each of the cube's six faces. It used to walk the graph
+  for every face.
+- `bundle.rs`: shadow passes no longer look for the reflection probe the observer is in, which
+  cost a reflection query on every node, for an environment map shadows never use
+  (`RenderDataBundleStorageOptions::collect_environment`).
+
+In the maze game on the web, where shadows come from shadow maps, the two took a frame from about
+33 ms to under 16.7.
