@@ -191,8 +191,9 @@ pub struct WgpuGraphicsServer {
     /// Tracked GPU memory usage (buffers + textures).
     pub memory_usage: RefCell<ServerMemoryUsage>,
     pipeline_statistics: RefCell<PipelineStatistics>,
-    /// Small buffer bound to extra vertex slots when geometry lacks attributes the shader expects.
-    pub dummy_vertex_buffer: wgpu::Buffer,
+    /// Zeroed buffer bound to extra vertex slots when geometry lacks attributes the shader
+    /// expects, one element per instance; see [`Self::fit_dummy_vertices`].
+    pub dummy_vertex_buffer: RefCell<wgpu::Buffer>,
     /// Non-filtering sampler for textures with non-filterable formats (e.g. R32Float).
     non_filtering_sampler: wgpu::Sampler,
     /// Copies depth where the backend cannot (WebGL).
@@ -411,7 +412,7 @@ impl WgpuGraphicsServer {
 
         let dummy_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DummyVB"),
-            size: 16, // enough for vec4f
+            size: crate::framebuffer::DUMMY_VERTEX_STRIDE,
             usage: wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         });
@@ -433,7 +434,7 @@ impl WgpuGraphicsServer {
             weak_self: RefCell::new(None),
             memory_usage: RefCell::new(ServerMemoryUsage::default()),
             pipeline_statistics: RefCell::new(PipelineStatistics::default()),
-            dummy_vertex_buffer,
+            dummy_vertex_buffer: RefCell::new(dummy_vertex_buffer),
             non_filtering_sampler,
             depth_copy: Default::default(),
             current_frame: RefCell::new(None),
@@ -570,8 +571,9 @@ impl WgpuGraphicsServer {
                 rp.set_vertex_buffer(i as u32, vb.slice(..));
             }
             let geo_buf_count = cmd.vertex_buffers.len() as u32;
+            let dummy = self.dummy_vertex_buffer.borrow().clone();
             for i in 0..cmd.extra_verts {
-                rp.set_vertex_buffer(geo_buf_count + i, self.dummy_vertex_buffer.slice(..));
+                rp.set_vertex_buffer(geo_buf_count + i, dummy.slice(..));
             }
             rp.set_index_buffer(cmd.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             rp.draw_indexed(cmd.start_idx..cmd.end_idx, 0, 0..cmd.instances);
@@ -583,6 +585,23 @@ impl WgpuGraphicsServer {
 }
 
 impl WgpuGraphicsServer {
+    /// Makes the dummy vertex buffer hold an element for each of `instances`. Its attributes
+    /// step per instance, and WebGL rejects a draw that would read past the end of a buffer. A
+    /// new buffer is zeroed, so draws recorded against the old one read the same zeros.
+    pub fn fit_dummy_vertices(&self, instances: u32) {
+        let size = u64::from(instances.max(1)) * crate::framebuffer::DUMMY_VERTEX_STRIDE;
+        let mut buffer = self.dummy_vertex_buffer.borrow_mut();
+        if buffer.size() >= size {
+            return;
+        }
+        *buffer = self.state.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DummyVB"),
+            size: size.next_power_of_two(),
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        });
+    }
+
     /// Acquires the next surface image and clears it to black, for frames that drew nothing on
     /// screen. Returns `None` if no image is available right now.
     fn clear_surface_frame(&self) -> Option<wgpu::SurfaceTexture> {

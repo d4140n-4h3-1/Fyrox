@@ -83,7 +83,7 @@ below 0 instead of -1 and stores render targets top row first.
   that jerked for a frame a few times each time round a walk.
 
 **In a browser.** On `wasm32` the backend draws with WebGL 2, through wgpu's GL backend; the game
-has to enable wgpu's `webgl` feature. This path had never run, and failed in five places.
+has to enable wgpu's `webgl` feature. This path had never run, and failed in six places.
 - `server.rs`: the surface is never configured at zero size. winit learns a canvas's size only
   once the page has laid it out, so the first size it reports is zero; the real one follows as a
   resize.
@@ -99,3 +99,9 @@ has to enable wgpu's `webgl` feature. This path had never run, and failed in fiv
   backend copies a texture by reading it as a framebuffer's color, which a depth texture cannot
   be, so the G-buffer's depth never reached the scene framebuffer and light volumes lit nothing.
   Stencil is not copied.
+- `framebuffer.rs`, `server.rs`: attributes a mesh lacks (bone weights and indices, a second UV
+  set) are read from a zeroed dummy buffer that steps once per instance, and grows to hold an
+  element for each. It used to step per vertex with a stride of zero, which Vulkan reads as the
+  same element for every vertex; OpenGL reads it as tightly packed, so every vertex after the
+  first read past the end of the buffer. Chromium clamps such reads; Firefox rejects the draw,
+  and only the sky was drawn.

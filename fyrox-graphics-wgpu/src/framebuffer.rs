@@ -797,6 +797,9 @@ impl WgpuFrameBuffer {
         }
 
         let ipe = geo.element_kind().index_per_element();
+        if extra_vert_count > 0 {
+            server.fit_dummy_vertices(instance_count);
+        }
 
         server
             .active_pass
@@ -1173,6 +1176,9 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
 /// Each entry is a `(location, format, &'static [VertexAttribute])` triple. The
 /// attribute arrays are `const` statics so they have `'static` lifetime without
 /// needing `Box::leak`, avoiding per-draw-call memory leaks.
+/// The dummy vertex buffer's element: room for the largest missing attribute, a `vec4f`.
+pub(crate) const DUMMY_VERTEX_STRIDE: u64 = 16;
+
 const EXTRA_VERTEX_LAYOUTS: &[(u32, &[wgpu::VertexAttribute])] = &[
     (
         4,
@@ -1203,8 +1209,11 @@ const EXTRA_VERTEX_LAYOUTS: &[(u32, &[wgpu::VertexAttribute])] = &[
 /// Builds the full vertex buffer layout list, adding dummy entries for attributes
 /// the shader expects but the geometry doesn't provide. Returns `(layouts, extra_count)`.
 ///
-/// Extra layouts use `array_stride: 0` and point to a small dummy vertex buffer
-/// on the server, so the shader reads valid (zeroed) data for missing attributes.
+/// Extra layouts step once per instance and point to a zeroed dummy vertex buffer on the
+/// server, so the shader reads zeros for missing attributes. They used to step per vertex with
+/// a stride of zero, which is one element for every vertex on Vulkan; but OpenGL takes a zero
+/// stride to mean tightly packed, so on WebGL each vertex read past the end of the buffer.
+/// Chromium clamps such reads, and Firefox rejects the draw, so nothing drew but the sky.
 fn build_vertex_layouts(geo: &WgpuGeometryBuffer) -> (Vec<wgpu::VertexBufferLayout<'static>>, u32) {
     let geo_layouts = geo.vertex_buffer_layouts();
 
@@ -1224,8 +1233,8 @@ fn build_vertex_layouts(geo: &WgpuGeometryBuffer) -> (Vec<wgpu::VertexBufferLayo
     for &(loc, attrs) in EXTRA_VERTEX_LAYOUTS {
         if (provided_mask & (1 << loc)) == 0 {
             all.push(wgpu::VertexBufferLayout {
-                array_stride: 0,
-                step_mode: wgpu::VertexStepMode::Vertex,
+                array_stride: DUMMY_VERTEX_STRIDE,
+                step_mode: wgpu::VertexStepMode::Instance,
                 attributes: attrs,
             });
             extra += 1;
