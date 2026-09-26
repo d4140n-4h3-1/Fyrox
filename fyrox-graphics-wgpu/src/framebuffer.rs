@@ -864,6 +864,7 @@ fn attachment_view(att: &Attachment) -> wgpu::TextureView {
 }
 
 fn copy_attachment_texture(
+    server: &WgpuGraphicsServer,
     encoder: &mut wgpu::CommandEncoder,
     src: &Attachment,
     dst: &Attachment,
@@ -880,6 +881,24 @@ fn copy_attachment_texture(
     let Some(dst_tex) = dst.texture.as_any().downcast_ref::<WgpuTexture>() else {
         return;
     };
+    if cfg!(target_arch = "wasm32") && dst_tex.format().has_depth_aspect() {
+        if src_x != dst_x || src_y != dst_y {
+            Log::warn("blit_to: depth moved to another place is not copied on WebGL, skipping");
+            return;
+        }
+        server.depth_copy.copy(
+            &server.state.device,
+            encoder,
+            src_tex.wgpu_texture(),
+            dst_tex.wgpu_texture(),
+            dst.level() as u32,
+            dst_x,
+            dst_y,
+            width,
+            height,
+        );
+        return;
+    }
     encoder.copy_texture_to_texture(
         wgpu::TexelCopyTextureInfo {
             texture: src_tex.wgpu_texture(),
@@ -966,6 +985,7 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
         if copy_color {
             for (src_att, dst_att) in self.color_attachments.iter().zip(&dest.color_attachments) {
                 copy_attachment_texture(
+                    &server,
                     &mut encoder,
                     src_att,
                     dst_att,
@@ -983,6 +1003,7 @@ impl GpuFrameBufferTrait for WgpuFrameBuffer {
             if let (Some(src_att), Some(dst_att)) = (&self.depth_attachment, &dest.depth_attachment)
             {
                 copy_attachment_texture(
+                    &server,
                     &mut encoder,
                     src_att,
                     dst_att,

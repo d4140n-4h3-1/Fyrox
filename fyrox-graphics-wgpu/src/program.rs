@@ -101,10 +101,14 @@ fn generate_wgsl_declarations(resources: &[ShaderResourceDefinition]) -> String 
                     continue;
                 }
                 decls += &format!("struct T{} {{\n", res.name);
-                for f in fields {
+                for (i, f) in fields.iter().enumerate() {
                     let n = &f.name;
                     let ty = wgsl_property_type(&f.kind);
-                    decls += &format!("    {n}: {ty},\n");
+                    // Aligning the first field to 16 leaves it where it is, and rounds the whole
+                    // struct up to a multiple of 16 bytes, which WebGL requires of a uniform
+                    // block. The engine pads the data it sends to match.
+                    let align = if i == 0 { "@align(16) " } else { "" };
+                    decls += &format!("    {align}{n}: {ty},\n");
                 }
                 decls += "}\n";
                 decls += &format!(
@@ -118,6 +122,90 @@ fn generate_wgsl_declarations(resources: &[ShaderResourceDefinition]) -> String 
     }
 
     decls
+}
+
+/// Declares every depth texture in `wgsl` as a float texture, and reads its depth from the red
+/// channel. Sampled with an ordinary sampler, a WGSL depth texture reads as its depth; but naga
+/// writes every depth texture for WebGL as a GLSL shadow sampler, which can only be compared
+/// against, and WebGL rejects the shader. A float texture reads the same depth from a depth
+/// texture, so this is what runs in a browser.
+fn depth_textures_as_float(wgsl: &str) -> String {
+    const TYPES: [(&str, &str); 2] = [
+        ("texture_depth_2d", "texture_2d<f32>"),
+        ("texture_depth_cube", "texture_cube<f32>"),
+    ];
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+
+    // Every variable and parameter declared as a depth texture: `name: texture_depth_2d`.
+    let mut names = Vec::new();
+    for (depth, _) in TYPES {
+        for (at, _) in wgsl.match_indices(depth) {
+            let before = wgsl[..at].trim_end();
+            if let Some(before) = before.strip_suffix(':') {
+                let before = before.trim_end();
+                let start = before.trim_end_matches(is_ident).len();
+                names.push(&before[start..]);
+            }
+        }
+    }
+
+    // A depth sample is an f32 and a float sample a vec4, so each sample of a depth texture
+    // takes its red channel. Names are only matched, not scoped: a sample followed by a field
+    // already is of a float texture of the same name, since an f32 has no fields.
+    let mut out = String::with_capacity(wgsl.len());
+    let mut rest = wgsl;
+    while let Some(at) = rest.find("textureSample") {
+        let (head, call) = rest.split_at(at);
+        out += head;
+        let name_end = call.find(|c: char| !is_ident(c)).unwrap_or(call.len());
+        let function = &call[..name_end];
+        let args = call[name_end..].strip_prefix('(');
+        let texture = args.map(|args| {
+            let args = args.trim_start();
+            &args[..args.find(|c: char| !is_ident(c)).unwrap_or(args.len())]
+        });
+        let close = matches!(function, "textureSample" | "textureSampleLevel")
+            .then_some(())
+            .and(texture)
+            .filter(|texture| names.contains(texture))
+            .and_then(|_| matching_paren(call, name_end))
+            .filter(|&close| !call[close + 1..].trim_start().starts_with('.'));
+        match close {
+            Some(close) => {
+                out += &call[..=close];
+                out += ".r";
+                rest = &call[close + 1..];
+            }
+            None => {
+                out += function;
+                rest = &call[name_end..];
+            }
+        }
+    }
+    out += rest;
+
+    for (depth, float) in TYPES {
+        out = out.replace(depth, float);
+    }
+    out
+}
+
+/// Where the parenthesis opened at `open` in `text` closes.
+fn matching_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => (),
+        }
+    }
+    None
 }
 
 /// Compiles WGSL source into a wgpu shader module.
@@ -178,6 +266,13 @@ fn create_bind_group_layout_with_formats(
                         | SamplerKind::USamplerCube => wgpu::TextureSampleType::Uint,
                         _ => wgpu::TextureSampleType::Float { filterable: true },
                     }
+                };
+                // See `depth_textures_as_float`.
+                let st = match st {
+                    wgpu::TextureSampleType::Depth if cfg!(target_arch = "wasm32") => {
+                        wgpu::TextureSampleType::Float { filterable: false }
+                    }
+                    st => st,
                 };
                 entries.push(wgpu::BindGroupLayoutEntry {
                     binding: res.binding as u32,
@@ -300,6 +395,9 @@ impl WgpuShader {
         wgsl += shared;
         wgsl += "\n";
         wgsl += &source;
+        if cfg!(target_arch = "wasm32") {
+            wgsl = depth_textures_as_float(&wgsl);
+        }
 
         let module = compile_wgsl(&server.state.device, &name, &wgsl)?;
         Ok(Self {
@@ -475,6 +573,29 @@ impl WgpuProgram {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn depth_textures_read_as_float() {
+        let wgsl = "@group(0) @binding(0) var depth_tex: texture_depth_2d;\n\
+                    @group(0) @binding(1) var color_tex: texture_2d<f32>;\n\
+                    fn e(map: texture_cube<f32>, s: sampler, d: vec3f) -> f32 {\n\
+                    return textureSample(map, s, d).r;\n\
+                    }\n\
+                    fn f(map: texture_depth_cube, s: sampler, d: vec3f) -> f32 {\n\
+                    return textureSample(map, s, g(d)) + textureSampleLevel(depth_tex, s, uv, 0.0)\n\
+                    + textureSample(color_tex, s, uv).r + f32(textureDimensions(depth_tex).x);\n\
+                    }";
+        let expected = "@group(0) @binding(0) var depth_tex: texture_2d<f32>;\n\
+                    @group(0) @binding(1) var color_tex: texture_2d<f32>;\n\
+                    fn e(map: texture_cube<f32>, s: sampler, d: vec3f) -> f32 {\n\
+                    return textureSample(map, s, d).r;\n\
+                    }\n\
+                    fn f(map: texture_cube<f32>, s: sampler, d: vec3f) -> f32 {\n\
+                    return textureSample(map, s, g(d)).r + textureSampleLevel(depth_tex, s, uv, 0.0).r\n\
+                    + textureSample(color_tex, s, uv).r + f32(textureDimensions(depth_tex).x);\n\
+                    }";
+        assert_eq!(super::depth_textures_as_float(wgsl), expected);
+    }
+
     use super::*;
 
     #[test]

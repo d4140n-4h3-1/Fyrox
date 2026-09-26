@@ -70,6 +70,8 @@
 
 /// Generic GPU buffer implementation (uniform, vertex, index, pixel read/write).
 pub mod buffer;
+
+mod depth_copy;
 /// Texture format helpers and binding offset constants.
 pub mod format_helpers;
 /// Render target (framebuffer) implementation with draw call logic and pipeline caching.

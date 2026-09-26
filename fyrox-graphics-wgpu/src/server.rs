@@ -195,6 +195,8 @@ pub struct WgpuGraphicsServer {
     pub dummy_vertex_buffer: wgpu::Buffer,
     /// Non-filtering sampler for textures with non-filterable formats (e.g. R32Float).
     non_filtering_sampler: wgpu::Sampler,
+    /// Copies depth where the backend cannot (WebGL).
+    pub depth_copy: crate::depth_copy::DepthCopy,
     /// Holds the acquired surface frame between do_draw and swap_buffers.
     pub current_frame: RefCell<Option<wgpu::SurfaceTexture>>,
     /// Whether the backbuffer needs clearing at the start of the next frame.
@@ -249,7 +251,11 @@ impl WgpuGraphicsServer {
         let window = window_target
             .create_window(window_attributes)
             .map_err(|e| FrameworkError::Custom(format!("Failed to create window: {e}")))?;
+        // In a browser, winit learns the canvas's size only once the page has laid it out, and
+        // reports zero until then; a zero-sized surface is invalid. The real size follows as a
+        // resize.
         let size = window.inner_size();
+        let size = winit::dpi::PhysicalSize::new(size.width.max(1), size.height.max(1));
 
         #[cfg(not(target_arch = "wasm32"))]
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -315,11 +321,9 @@ impl WgpuGraphicsServer {
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,
             required_features,
-            required_limits: if cfg!(target_arch = "wasm32") {
-                wgpu::Limits::downlevel_webgl2_defaults()
-            } else {
-                adapter.limits()
-            },
+            // In a browser too, what the browser allows: WebGL 2's minimums, such as 2048-pixel
+            // textures and four color attachments, are less than the renderer needs.
+            required_limits: adapter.limits(),
             memory_hints: wgpu::MemoryHints::Performance,
             // Ray tracing is behind this in wgpu: the caller has to say it accepts that the
             // implementation is still work in progress. Nothing else is asked for from it.
@@ -431,6 +435,7 @@ impl WgpuGraphicsServer {
             pipeline_statistics: RefCell::new(PipelineStatistics::default()),
             dummy_vertex_buffer,
             non_filtering_sampler,
+            depth_copy: Default::default(),
             current_frame: RefCell::new(None),
             backbuffer_needs_clear: Cell::new(true),
             backbuffer_depth_stencil: RefCell::new(None),
