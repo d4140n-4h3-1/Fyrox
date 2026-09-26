@@ -23,7 +23,7 @@ use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector3},
         color::Color,
-        math::Rect,
+        math::{frustum::Frustum, Rect},
     },
     graphics::{
         error::FrameworkError,
@@ -44,6 +44,7 @@ use crate::{
         utils::CubeMapFaceDescriptor,
         GeometryCache, RenderPassStatistics, POINT_SHADOW_PASS_NAME,
     },
+    graph::SceneGraph,
     scene::{collider::BitMask, graph::Graph},
 };
 
@@ -166,8 +167,8 @@ impl PointShadowMapRenderer {
 
         // What the light reaches is gathered once, for all six faces, with a box around the
         // light's sphere: walking the whole graph costs far more than drawing a face, and it
-        // used to be done for each face. Each face then draws it all with its own view, and the
-        // GPU clips away what that face does not see.
+        // used to be done for each face. Each face then draws only what is in its own view,
+        // as a walk for that face would have found - draw calls are dear on WebGL.
         let reach_view_matrix = Matrix4::look_at_rh(
             &Point3::from(light_pos),
             &Point3::from(light_pos - Vector3::z()),
@@ -214,6 +215,9 @@ impl PointShadowMapRenderer {
                 &face.up,
             );
 
+            let face_view_projection = light_projection_matrix * light_view_matrix;
+            let face_frustum =
+                Frustum::from_view_projection_matrix(face_view_projection).unwrap_or_default();
             bundle_storage.observer_position = ObserverPosition {
                 translation: light_pos,
                 z_near,
@@ -228,7 +232,12 @@ impl PointShadowMapRenderer {
                 geom_cache,
                 shader_cache,
                 |_| true,
-                |_| true,
+                |instance| {
+                    graph.try_get_node(instance.node_handle).map_or(true, |node| {
+                        !node.frustum_culling()
+                            || face_frustum.is_intersects_aabb(&node.world_bounding_box())
+                    })
+                },
                 BundleRenderContext {
                     texture_cache,
                     render_pass_name: &POINT_SHADOW_PASS_NAME,
