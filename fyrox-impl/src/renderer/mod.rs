@@ -40,6 +40,7 @@ pub mod visibility;
 
 mod bloom;
 mod convolution;
+mod fog;
 mod fxaa;
 mod gbuffer;
 mod hdr;
@@ -1178,6 +1179,20 @@ impl Renderer {
         render_data.statistics += pass_stats;
 
         let depth = render_data.gbuffer.depth();
+
+        // The fog over what is lit, sky and all; what is drawn forward after shows through it.
+        if let Some(fog) = scene.rendering_options.fog.as_ref() {
+            render_data.statistics += fog::render_fog(
+                server,
+                fog,
+                observer,
+                observer.viewport,
+                depth,
+                &render_data.hdr_scene_framebuffer,
+                &mut self.uniform_buffer_cache,
+                &self.renderer_resources,
+            )?;
+        }
 
         {
             let _debug_scope = server.begin_scope("ForwardRendering");

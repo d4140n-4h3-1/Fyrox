@@ -59,6 +59,8 @@ pub struct ShadersContainer {
     pub debug: RenderPassContainer,
     /// Fast approximate antialiasing shader.
     pub fxaa: RenderPassContainer,
+    /// Distance fog, laid over the lit scene (see [`crate::scene::Fog`]).
+    pub fog: RenderPassContainer,
     /// A shader for volumetric spotlight.
     pub spot_light_volume: RenderPassContainer,
     /// A shader for volumetric point light.
@@ -143,6 +145,7 @@ impl ShadersContainer {
             )?,
             debug: RenderPassContainer::from_str(server, include_shader!("debug.shader"))?,
             fxaa: RenderPassContainer::from_str(server, include_shader!("fxaa.shader"))?,
+            fog: RenderPassContainer::from_str(server, include_shader!("fog.shader"))?,
             spot_light_volume: RenderPassContainer::from_str(
                 server,
                 include_shader!("spot_volumetric.shader"),
@@ -388,5 +391,41 @@ impl RendererResources {
             SamplerFallback::Black => &self.black_dummy,
             SamplerFallback::Volume => &self.volume_dummy,
         }
+    }
+}
+
+#[cfg(all(test, feature = "backend_wgpu", not(feature = "backend_opengl")))]
+mod tests {
+    use crate::material::shader::Shader;
+    use fyrox_graphics_wgpu::{program::assemble_wgsl, vertex_depth::remap_vertex_depth};
+
+    /// Every built-in shader, assembled as the wgpu backend assembles it, is valid WGSL: one that
+    /// is not fails only when the renderer is made, with the window.
+    #[test]
+    fn every_wgpu_shader_is_valid_wgsl() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/renderer/shaders/wgpu");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "shader") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let shader = Shader::from_string(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+            let resources = &shader.definition.resources;
+            for pass in &shader.definition.passes {
+                let vs = remap_vertex_depth(&pass.vertex_shader.0).unwrap_or_else(|| pass.vertex_shader.0.clone());
+                for (stage, source) in [("vertex", vs), ("fragment", pass.fragment_shader.0.clone())] {
+                    let wgsl = assemble_wgsl(&source, resources);
+                    let module = naga::front::wgsl::parse_str(&wgsl)
+                        .unwrap_or_else(|e| panic!("{path:?} {} {stage}: {}", pass.name, e.emit_to_string(&wgsl)));
+                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                        .validate(&module)
+                        .unwrap_or_else(|e| panic!("{path:?} {} {stage}: {e:?}", pass.name));
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 40, "only {checked} stages found");
     }
 }

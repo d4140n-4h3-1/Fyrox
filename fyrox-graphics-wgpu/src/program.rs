@@ -190,6 +190,21 @@ fn depth_textures_as_float(wgsl: &str) -> String {
     out
 }
 
+/// The whole WGSL a shader's `source` is compiled as: the declarations of its `resources`, the
+/// shared library ([`shaders/shared.wgsl`]), then the source itself - a vertex shader's already
+/// remapped to wgpu's clip-space depth (see [`crate::vertex_depth`]).
+pub fn assemble_wgsl(source: &str, resources: &[ShaderResourceDefinition]) -> String {
+    let mut wgsl = String::new();
+    wgsl += &generate_wgsl_declarations(resources);
+    wgsl += include_str!("shaders/shared.wgsl");
+    wgsl += "\n";
+    wgsl += source;
+    if cfg!(target_arch = "wasm32") {
+        wgsl = depth_textures_as_float(&wgsl);
+    }
+    wgsl
+}
+
 /// Where the parenthesis opened at `open` in `text` closes.
 fn matching_paren(text: &str, open: usize) -> Option<usize> {
     let mut depth = 0;
@@ -390,18 +405,7 @@ impl WgpuShader {
             source
         };
 
-        let declarations = generate_wgsl_declarations(resources);
-        let shared = include_str!("shaders/shared.wgsl");
-
-        let mut wgsl = String::new();
-        wgsl += &declarations;
-        wgsl += shared;
-        wgsl += "\n";
-        wgsl += &source;
-        if cfg!(target_arch = "wasm32") {
-            wgsl = depth_textures_as_float(&wgsl);
-        }
-
+        let wgsl = assemble_wgsl(&source, resources);
         let module = compile_wgsl(&server.state.device, &name, &wgsl)?;
         Ok(Self {
             _server: server.weak_ref(),

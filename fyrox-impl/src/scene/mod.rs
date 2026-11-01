@@ -180,6 +180,41 @@ pub enum EnvironmentLightingSource {
     AmbientColor,
 }
 
+/// Distance fog over a scene: everything drawn is covered by more of [`Fog::color`] the further
+/// it is from the camera, thinning with height. Of each meter beyond [`Fog::start`], `density`
+/// of what is left shows through no more; that density falls off by a factor `e` every
+/// `1 / height_falloff` meters above [`Fog::base_height`], so the fog lies low. The sky - where
+/// nothing is drawn - is covered by [`Fog::sky_opacity`] of it.
+#[derive(Debug, Clone, Copy, Visit, Reflect, PartialEq)]
+#[reflect(type_uuid = "60057d15-082b-4632-9897-d148ea8b0ef4")]
+pub struct Fog {
+    /// Its colour, in sRGB.
+    pub color: Color,
+    /// How thick it is, per meter.
+    pub density: f32,
+    /// How far from the camera it begins, in meters.
+    pub start: f32,
+    /// The height it is thickest at and below, in meters.
+    pub base_height: f32,
+    /// How fast it thins above that, per meter; zero for the same everywhere.
+    pub height_falloff: f32,
+    /// How much of the sky it covers, from 0 to 1.
+    pub sky_opacity: f32,
+}
+
+impl Default for Fog {
+    fn default() -> Self {
+        Self {
+            color: Color::opaque(160, 165, 170),
+            density: 0.03,
+            start: 2.0,
+            base_height: 0.0,
+            height_falloff: 0.0,
+            sky_opacity: 1.0,
+        }
+    }
+}
+
 /// Rendering options of a scene. It allows you to specify a render target to render the scene to, change its clear color, etc.
 #[derive(Debug, Visit, Reflect, PartialEq)]
 #[reflect(type_uuid = "74a58c1d-4f70-4a04-9cac-bfdaec63b321")]
@@ -211,6 +246,10 @@ pub struct SceneRenderingOptions {
     /// by this coefficient.
     #[visit(optional)]
     pub environment_lighting_brightness: f32,
+
+    /// Distance fog over the scene, if any (see [`Fog`]). Default is [`None`].
+    #[visit(optional)]
+    pub fog: Option<Fog>,
 }
 
 impl Default for SceneRenderingOptions {
@@ -222,6 +261,7 @@ impl Default for SceneRenderingOptions {
             ambient_lighting_color: Color::opaque(100, 100, 100),
             environment_lighting_source: Default::default(),
             environment_lighting_brightness: 1.0,
+            fog: None,
         }
     }
 }
@@ -235,6 +275,7 @@ impl Clone for SceneRenderingOptions {
             ambient_lighting_color: self.ambient_lighting_color,
             environment_lighting_source: self.environment_lighting_source,
             environment_lighting_brightness: self.environment_lighting_brightness,
+            fog: self.fog,
         }
     }
 }

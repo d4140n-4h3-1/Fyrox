@@ -99,5 +99,8 @@ backend_opengl = ["dep:fyrox-graphics-gl", "fyrox-material/backend_opengl"]
 backend_wgpu = ["dep:fyrox-graphics-wgpu", "fyrox-material/backend_wgpu"]
 mesh_analysis = []
 
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30", features = ["android-native-activity"] }
