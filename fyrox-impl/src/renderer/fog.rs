@@ -29,7 +29,7 @@ use crate::{
             shader::{binding, property, PropertyGroup, RenderMaterial},
             uniform::UniformBufferCache,
         },
-        make_viewport_matrix,
+        make_deferred_viewport_matrix,
         observer::Observer,
         resources::RendererResources,
         RenderPassStatistics,
@@ -52,7 +52,9 @@ pub(crate) fn render_fog(
 ) -> Result<RenderPassStatistics, FrameworkError> {
     let _debug_scope = server.begin_scope("Fog");
     let mut statistics = RenderPassStatistics::default();
-    let frame_matrix = make_viewport_matrix(viewport);
+    // As every pass that finds where a pixel is from the G-buffer's depth: on wgpu the plain
+    // viewport matrix reads each pixel's depth from its mirror image, top to bottom.
+    let frame_matrix = make_deferred_viewport_matrix(viewport);
     let inv_view_projection = observer
         .position
         .view_projection_matrix

@@ -697,7 +697,16 @@ impl NodeTrait for Mesh {
             return RdcControlFlow::Continue;
         }
 
-        let sorting_index = ctx.calculate_sorting_index(self.global_position());
+        // Opaque meshes, drawn into the G-buffer, go nearest first, so that the depth test throws
+        // out what is behind them before it is shaded; meshes blended over the scene furthest
+        // first, as blending needs. By the middle of the mesh's bounds, not where its origin is:
+        // a mesh made of many pieces joined - a block of a city, a stand of trees - has its
+        // origin wherever the joining left it, often the world's.
+        let middle = self.world_bounding_box().center();
+        let sorting_index = match self.render_path() {
+            RenderPath::Deferred => u64::MAX - ctx.calculate_sorting_index(middle),
+            RenderPath::Forward => ctx.calculate_sorting_index(middle),
+        };
 
         if let BatchingMode::Static = *self.batching_mode {
             let mut container = self.batch_container.0.safe_lock();
