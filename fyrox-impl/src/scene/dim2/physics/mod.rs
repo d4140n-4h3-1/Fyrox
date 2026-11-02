@@ -621,7 +621,10 @@ impl<'a> QueryFilter<'a> {
         predicate: &'a dyn Fn(ColliderHandle, &Collider) -> bool,
     ) -> rapier2d::pipeline::QueryFilter<'a> {
         rapier2d::pipeline::QueryFilter {
-            flags: rapier2d::pipeline::QueryFilterFlags::from_bits(self.flags.bits()).unwrap(),
+            // Each of our flags is one bit above rapier's (EXCLUDE_FIXED is 1 << 1 here, 1 << 0
+            // there): passed as they are, each would ask for the next one - excluding the
+            // sensors would exclude every solid collider, and EXCLUDE_SOLIDS would not unwrap.
+            flags: rapier2d::pipeline::QueryFilterFlags::from_bits(self.flags.bits() >> 1).unwrap(),
             groups: self.groups.map(|g| {
                 InteractionGroups::new(
                     u32_to_group(g.memberships.0),
