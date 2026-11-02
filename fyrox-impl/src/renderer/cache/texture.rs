@@ -284,9 +284,15 @@ impl TextureCache {
         self.cache.alive_count()
     }
 
-    /// Tries to bind existing GPU texture with a texture resource. If there's no such binding, then
-    /// a new binding is created, otherwise - only the TTL is updated to keep the GPU texture alive
-    /// for a certain time period (see [`TimeToLive`]).
+    /// Binds a GPU texture with a texture resource: a camera's render target with the frame it
+    /// was drawn into. If there's no such binding, a new one is created; otherwise the binding is
+    /// pointed at `gpu_texture` and its TTL updated, to keep the GPU texture alive for a certain
+    /// time period (see [`TimeToLive`]).
+    ///
+    /// An existing binding is not kept as it was: a render target that something drawn before its
+    /// camera samples - another camera's view of a screen showing it, drawn first - has been
+    /// uploaded from its (empty) pixels by then, and kept, the camera's frame would never be seen
+    /// on it.
     pub fn try_register(
         &mut self,
         server: &dyn GraphicsServer,
@@ -295,8 +301,10 @@ impl TextureCache {
     ) -> Result<(), FrameworkError> {
         let data = texture.data_ref();
         let index = data.cache_index.clone();
-        let entry = self.cache.get_mut(&index);
-        if entry.is_none() {
+        if let Some(entry) = self.cache.get_mut(&index) {
+            entry.value.gpu_texture = gpu_texture;
+            entry.value.modifications_counter = data.modifications_count();
+        } else {
             self.cache.spawn(
                 TextureRenderData {
                     gpu_texture,
