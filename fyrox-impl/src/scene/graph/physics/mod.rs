@@ -1291,47 +1291,21 @@ impl PhysicsWorld {
         )
     }
 
+    /// A view of the world's colliders as they are now, for casting rays from many threads at
+    /// once (see [`RayCaster`]): `cast_ray` keeps statistics in the world, which threads cannot
+    /// share, and the world as a whole cannot be shared between threads.
+    pub fn ray_caster(&self) -> RayCaster<'_> {
+        RayCaster {
+            broad_phase: &self.broad_phase,
+            bodies: &self.bodies,
+            colliders: &self.colliders,
+        }
+    }
+
     /// Casts a ray with given options.
     pub fn cast_ray<S: QueryResultsStorage>(&self, opts: RayCastOptions, query_buffer: &mut S) {
         let time = instant::Instant::now();
-
-        let query = self.query_pipeline(rapier3d::pipeline::QueryFilter::new().groups(
-            InteractionGroups::new(
-                u32_to_group(opts.groups.memberships.0),
-                u32_to_group(opts.groups.filter.0),
-                Default::default(),
-            ),
-        ));
-
-        query_buffer.clear();
-        let ray = Ray::new(
-            opts.ray_origin.into(),
-            opts.ray_direction
-                .try_normalize(f32::EPSILON)
-                .unwrap_or_default()
-                .into(),
-        );
-        for (_, collider, intersection) in query.intersect_ray(ray, opts.max_len, true) {
-            query_buffer.push(Intersection {
-                collider: Handle::decode_from_u128(collider.user_data),
-                normal: intersection.normal.into(),
-                position: ray.point_at(intersection.time_of_impact).into(),
-                feature: intersection.feature.into(),
-                toi: intersection.time_of_impact,
-            });
-        }
-        if opts.sort_results {
-            query_buffer.sort_intersections_by(|a, b| {
-                if a.toi > b.toi {
-                    Ordering::Greater
-                } else if a.toi < b.toi {
-                    Ordering::Less
-                } else {
-                    Ordering::Equal
-                }
-            })
-        }
-
+        self.ray_caster().cast_ray(opts, query_buffer);
         self.performance_statistics.total_ray_cast_time.set(
             self.performance_statistics.total_ray_cast_time.get()
                 + (instant::Instant::now() - time),
@@ -2042,5 +2016,59 @@ impl Default for PhysicsWorld {
 impl Debug for PhysicsWorld {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "PhysicsWorld")
+    }
+}
+
+/// A view of a [`PhysicsWorld`]'s colliders as they were when it was taken, for casting rays from
+/// many threads at once - the colliders shared, nothing changed by a ray: see
+/// [`PhysicsWorld::ray_caster`]. A level's survey of where can be walked casts tens of millions.
+pub struct RayCaster<'a> {
+    broad_phase: &'a DefaultBroadPhase,
+    bodies: &'a RigidBodySet,
+    colliders: &'a ColliderSet,
+}
+
+impl RayCaster<'_> {
+    /// Casts a ray with given options, as [`PhysicsWorld::cast_ray`] does.
+    pub fn cast_ray<S: QueryResultsStorage>(&self, opts: RayCastOptions, query_buffer: &mut S) {
+        let query = self.broad_phase.as_query_pipeline(
+            &DefaultQueryDispatcher,
+            self.bodies,
+            self.colliders,
+            rapier3d::pipeline::QueryFilter::new().groups(InteractionGroups::new(
+                u32_to_group(opts.groups.memberships.0),
+                u32_to_group(opts.groups.filter.0),
+                Default::default(),
+            )),
+        );
+
+        query_buffer.clear();
+        let ray = Ray::new(
+            opts.ray_origin.into(),
+            opts.ray_direction
+                .try_normalize(f32::EPSILON)
+                .unwrap_or_default()
+                .into(),
+        );
+        for (_, collider, intersection) in query.intersect_ray(ray, opts.max_len, true) {
+            query_buffer.push(Intersection {
+                collider: Handle::decode_from_u128(collider.user_data),
+                normal: intersection.normal.into(),
+                position: ray.point_at(intersection.time_of_impact).into(),
+                feature: intersection.feature.into(),
+                toi: intersection.time_of_impact,
+            });
+        }
+        if opts.sort_results {
+            query_buffer.sort_intersections_by(|a, b| {
+                if a.toi > b.toi {
+                    Ordering::Greater
+                } else if a.toi < b.toi {
+                    Ordering::Less
+                } else {
+                    Ordering::Equal
+                }
+            })
+        }
     }
 }
