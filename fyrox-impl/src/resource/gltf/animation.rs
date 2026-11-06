@@ -49,10 +49,16 @@ pub enum ImportedBinding {
 }
 
 impl ImportedBinding {
+    /// How far a curve may stray, simplified on import. Each rotation component is simplified on
+    /// its own, so this is a quaternion component, not an angle: one of PI / 180 (as it was) let
+    /// a bone turn up to about 2 degrees off its keys, which down a leg is centimetres at the
+    /// ankle - feet that should be planted slid and bobbed. Exporters that drop keys themselves
+    /// leave little for this to do, so it keeps to well under a tenth of a degree and a tenth
+    /// of a millimetre.
     fn epsilon(&self) -> f32 {
         match self {
-            ImportedBinding::Position => 0.001,
-            ImportedBinding::Rotation => std::f32::consts::PI / 180.0,
+            ImportedBinding::Position => 0.0001,
+            ImportedBinding::Rotation => 0.0005,
             ImportedBinding::Scale => 0.1,
             ImportedBinding::Weight(_) => 0.001,
         }
