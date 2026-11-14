@@ -669,7 +669,13 @@ impl NodeTrait for Mesh {
         new_global_transform: &Matrix4<f32>,
         context: &mut SyncContext,
     ) {
-        if self.surfaces.iter().any(|s| !s.bones.is_empty()) {
+        // A skinned mesh out of sight - as of the last time visibility was worked out - is bounded
+        // as any other, by its own box: its bones are not looked up. The bounds only cull what is
+        // drawn, and it is not; and a model often carries many hidden skinned meshes that move
+        // with it (pieces to break off, outfits to change into), each looking up every bone of
+        // the skeleton every frame. Shown again, it is bounded by its bones from the next time it
+        // moves.
+        if self.global_visibility() && self.surfaces.iter().any(|s| !s.bones.is_empty()) {
             let mut world_aabb = self.local_bounding_box().transform(new_global_transform);
 
             // Special case for skinned meshes.
